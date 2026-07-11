@@ -75,24 +75,34 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
     src, src_nrm = sample_with_normals(sub, n_src)
     center = src.mean(axis=0)
 
-    variants = [(part["s"], part["R"], part["t"])]
-    for axis in range(3):
-        Q = rot180(axis)
-        # Rotate the part 180 degrees about its own centroid axis.
-        R2 = part["R"] @ Q
-        t2 = part["t"] + part["s"] * part["R"] @ (center - Q @ center)
-        variants.append((part["s"], R2, t2))
+    s, R, t, err = trimmed_icp(
+        src, ref_tree, ref_pts, part["s"], part["R"], part["t"],
+        src_nrm=src_nrm, tgt_nrm=ref_nrm,
+    )
+    score = oriented_score(src, src_nrm, s, R, t, ref_tree, ref_nrm)
 
-    best = None
-    for s0, R0, t0 in variants:
-        s, R, t, err = trimmed_icp(
-            src, ref_tree, ref_pts, s0, R0, t0,
-            src_nrm=src_nrm, tgt_nrm=ref_nrm,
-        )
-        score = oriented_score(src, src_nrm, s, R, t, ref_tree, ref_nrm)
-        if best is None or score < best[0]:
-            best = (score, s, R, t, err)
-    _, part["s"], part["R"], part["t"], part["err"] = best
+    # Iterate the flip test to a fixed point: a flip variant polished from a
+    # poor starting pose can converge short of its best and lose the score
+    # comparison unfairly, so whenever a flip wins, re-test from the new
+    # (better-converged) pose. The score strictly decreases, so this stops.
+    for _ in range(3):
+        improved = False
+        for axis in range(3):
+            Q = rot180(axis)
+            # Rotate the part 180 degrees about its own centroid axis.
+            R2 = R @ Q
+            t2 = t + s * R @ (center - Q @ center)
+            s3, R3, t3, err3 = trimmed_icp(
+                src, ref_tree, ref_pts, s, R2, t2,
+                src_nrm=src_nrm, tgt_nrm=ref_nrm,
+            )
+            sc3 = oriented_score(src, src_nrm, s3, R3, t3, ref_tree, ref_nrm)
+            if sc3 < score:
+                s, R, t, err, score = s3, R3, t3, err3, sc3
+                improved = True
+        if not improved:
+            break
+    part["s"], part["R"], part["t"], part["err"] = s, R, t, err
     return part
 
 
