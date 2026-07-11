@@ -54,6 +54,8 @@ def trimmed_icp(
     crop_margin=0.06,
     tol=1e-7,
     scale_bounds=(0.6, 1.6),
+    src_nrm=None,
+    tgt_nrm=None,
 ):
     """Trimmed ICP estimating a similarity transform.
 
@@ -65,6 +67,11 @@ def trimmed_icp(
     crop_margin   : target points outside the transformed source's bounding
                     box (expanded by this margin) are ignored, so the garment
                     only registers against its own region of the avatar.
+    src_nrm/tgt_nrm : optional unit normals for source samples / target
+                    points. When given, correspondences whose normals face
+                    opposite directions are rejected, which stops the fit
+                    from settling into flipped orientations or hugging a
+                    surface from the wrong side.
     scale_bounds  : allowed scale range relative to the initial scale.
                     Unbounded scale estimation collapses the source onto the
                     target surface (a shrunken object always has a lower
@@ -85,11 +92,19 @@ def trimmed_icp(
         if box.sum() > 500:
             tree = NNIndex(target_pts[box])
             tpts = target_pts[box]
+            tnrm = tgt_nrm[box] if tgt_nrm is not None else None
         else:
-            tree, tpts = target_tree, target_pts
+            tree, tpts, tnrm = target_tree, target_pts, tgt_nrm
 
         d, idx = tree.query(cur)
+        if src_nrm is not None and tnrm is not None:
+            agree = ((src_nrm @ R.T) * tnrm[idx]).sum(axis=1) > 0.0
+            if agree.sum() > 300:
+                d = np.where(agree, d, np.inf)
         keep = np.argsort(d)[: max(int(len(d) * trim), 100)]
+        keep = keep[np.isfinite(d[keep])]
+        if len(keep) < 100:
+            keep = np.argsort(np.where(np.isfinite(d), d, np.inf))[:100]
         err = d[keep].mean()
         if abs(prev_err - err) < tol:
             break
@@ -118,6 +133,25 @@ def fit_score(src_pts, s, R, t, ref_tree):
     """
     d, _ = ref_tree.query(apply_srt(src_pts, s, R, t))
     return d.mean() / s
+
+
+def oriented_score(src_pts, src_nrm, s, R, t, ref_tree, ref_nrm):
+    """Normal-aware absolute fit error, for choosing between orientations.
+
+    Each point's distance is weighted by (2 - n_src.n_ref): aligned normals
+    weigh 1, opposing normals weigh up to 3, so a flipped fit (identical in
+    pure point distance for near-symmetric shapes) scores ~3x worse.
+    """
+    d, idx = ref_tree.query(apply_srt(src_pts, s, R, t))
+    dot = ((src_nrm @ R.T) * ref_nrm[idx]).sum(axis=1)
+    return float((d * (2.0 - np.clip(dot, -1.0, 1.0))).mean())
+
+
+def rot180(axis):
+    """180-degree rotation matrix about x, y or z."""
+    R = -np.eye(3)
+    R[axis, axis] = 1.0
+    return R
 
 
 def yaw_matrix(degrees):

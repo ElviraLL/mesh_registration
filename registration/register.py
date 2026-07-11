@@ -24,7 +24,7 @@ from .landmarks import (
     shoes_landmarks,
     tops_landmarks,
 )
-from .icp import trimmed_icp, compose, yaw_matrix, fit_score
+from .icp import trimmed_icp, compose, yaw_matrix, fit_score, oriented_score, rot180
 
 REFERENCE = "3d_generated_mesh_one_piece_avatar_body_processed.glb"
 
@@ -53,6 +53,47 @@ def load_mesh(path):
 def sample(mesh, n):
     pts, _ = trimesh.sample.sample_surface(mesh, n)
     return np.asarray(pts)
+
+
+def sample_with_normals(mesh, n):
+    pts, fidx = trimesh.sample.sample_surface(mesh, n)
+    return np.asarray(pts), mesh.face_normals[fidx]
+
+
+def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
+    """Fix flipped/tilted orientations of a chosen part, then final-polish.
+
+    Pure point-distance ICP cannot distinguish a near-symmetric part (a
+    helmet dome, a boot) from its 180-degree flip, and shape differences
+    between the standalone garment and its baked counterpart can tilt the
+    converged pose. This stage re-polishes the chosen transform with
+    normal-consistent ICP (opposing-normal correspondences rejected) and
+    compares it against its three 180-degree flips about the part's own
+    axes, scored by normal-weighted error.
+    """
+    sub = _mask_submesh(mesh, part["mask"])
+    src, src_nrm = sample_with_normals(sub, n_src)
+    center = src.mean(axis=0)
+
+    variants = [(part["s"], part["R"], part["t"])]
+    for axis in range(3):
+        Q = rot180(axis)
+        # Rotate the part 180 degrees about its own centroid axis.
+        R2 = part["R"] @ Q
+        t2 = part["t"] + part["s"] * part["R"] @ (center - Q @ center)
+        variants.append((part["s"], R2, t2))
+
+    best = None
+    for s0, R0, t0 in variants:
+        s, R, t, err = trimmed_icp(
+            src, ref_tree, ref_pts, s0, R0, t0,
+            src_nrm=src_nrm, tgt_nrm=ref_nrm,
+        )
+        score = oriented_score(src, src_nrm, s, R, t, ref_tree, ref_nrm)
+        if best is None or score < best[0]:
+            best = (score, s, R, t, err)
+    _, part["s"], part["R"], part["t"], part["err"] = best
+    return part
 
 
 def _init_body(gv, ref_lm):
@@ -339,7 +380,7 @@ def register_all(data_dir, out_dir, preview=True, method="landmarks"):
 
     ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, REFERENCE))
     ref_lm = avatar_landmarks(ref_mesh.vertices)
-    ref_pts = sample(ref_mesh, 120000)
+    ref_pts, ref_nrm = sample_with_normals(ref_mesh, 120000)
     ref_tree = NNIndex(ref_pts)
     ref_feat = {} if method == "fpfh" else None
 
@@ -363,7 +404,10 @@ def register_all(data_dir, out_dir, preview=True, method="landmarks"):
     combined = trimesh.Scene()
     for name, (g_scene, g_mesh) in loaded.items():
         fname = GARMENTS[name]
-        parts = parts_by_name[name]
+        parts = [
+            orient_and_polish(g_mesh, p, ref_tree, ref_pts, ref_nrm)
+            for p in parts_by_name[name]
+        ]
 
         # Bake the per-part transforms into the vertices (a garment may have
         # several parts with different transforms, e.g. left/right shoe).
