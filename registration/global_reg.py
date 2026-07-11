@@ -34,6 +34,25 @@ SCALE_GRID = np.geomspace(0.08, 1.35, 10)
 # once per level (cached).
 VOXEL_LEVELS = (0.02, 0.013, 0.008, 0.005)
 
+# Generated assets share a canonical orientation (y-up, z-forward); a correct
+# registration only ever needs a small tilt on top of an axis-aligned yaw
+# (0/90/180/270 degrees). Candidates rotated further than this are RANSAC
+# artifacts and are rejected outright - large-angle wrong-orientation fits
+# are exactly the ones point-distance ICP cannot repair and scoring finds
+# hardest to reject.
+MAX_TILT_DEG = 35.0
+
+
+def _rotation_angle_deg(R):
+    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+
+
+def _near_canonical(R, max_tilt=MAX_TILT_DEG):
+    return any(
+        _rotation_angle_deg(R @ yaw_matrix(-a)) <= max_tilt
+        for a in (0.0, 90.0, 180.0, 270.0)
+    )
+
 
 def _pick_voxel(extent):
     """Voxel level ~1/25 of the object's largest dimension."""
@@ -135,6 +154,8 @@ def collect_candidates(
             if not np.isfinite(s1) or not (0.4 <= s1 <= 2.5):
                 # RANSAC collapsed or drifted far from this hypothesis; a
                 # neighboring hypothesis covers that scale.
+                continue
+            if not _near_canonical(R):
                 continue
             s, R, t, err = trimmed_icp(src_pts, ref_tree, ref_pts, s0 * s1, R, t)
             cand = _finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm)

@@ -95,8 +95,7 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
     # (better-converged) pose. The score strictly decreases, so this stops.
     for _ in range(3):
         improved = False
-        for axis in range(3):
-            Q = rot180(axis)
+        for Q in (rot180(1),):  # yaw flip; other axes violate the y-up prior
             # Rotate the part 180 degrees about its own centroid axis.
             R2 = R @ Q
             t2 = t + R @ (center - Q @ center)
