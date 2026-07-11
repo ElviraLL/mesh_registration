@@ -73,13 +73,21 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
     """
     sub = _mask_submesh(mesh, part["mask"])
     src, src_nrm = sample_with_normals(sub, n_src)
-    center = src.mean(axis=0)
 
-    s, R, t, err = trimmed_icp(
-        src, ref_tree, ref_pts, part["s"], part["R"], part["t"],
+    # The scale was already established (and cross-checked by the joint
+    # coverage selection); orientation refinement must not touch it, or the
+    # absolute-error comparison reopens the shrink exploit. Pre-scale the
+    # source and run rotation+translation-only ICP: for x -> s*R*x + t, the
+    # (R, t) of the scaled source are exactly the part's own (R, t).
+    S = part["s"]
+    srcS = S * src
+    center = srcS.mean(axis=0)
+
+    _, R, t, err = trimmed_icp(
+        srcS, ref_tree, ref_pts, 1.0, part["R"], part["t"],
         src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
     )
-    score = oriented_score(src, src_nrm, s, R, t, ref_tree, ref_nrm)
+    score = oriented_score(src, src_nrm, S, R, t, ref_tree, ref_nrm)
 
     # Iterate the flip test to a fixed point: a flip variant polished from a
     # poor starting pose can converge short of its best and lose the score
@@ -91,18 +99,18 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
             Q = rot180(axis)
             # Rotate the part 180 degrees about its own centroid axis.
             R2 = R @ Q
-            t2 = t + s * R @ (center - Q @ center)
-            s3, R3, t3, err3 = trimmed_icp(
-                src, ref_tree, ref_pts, s, R2, t2,
+            t2 = t + R @ (center - Q @ center)
+            _, R3, t3, err3 = trimmed_icp(
+                srcS, ref_tree, ref_pts, 1.0, R2, t2,
                 src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
             )
-            sc3 = oriented_score(src, src_nrm, s3, R3, t3, ref_tree, ref_nrm)
+            sc3 = oriented_score(src, src_nrm, S, R3, t3, ref_tree, ref_nrm)
             if sc3 < score:
-                s, R, t, err, score = s3, R3, t3, err3, sc3
+                R, t, err, score = R3, t3, err3, sc3
                 improved = True
         if not improved:
             break
-    part["s"], part["R"], part["t"], part["err"] = s, R, t, err
+    part["s"], part["R"], part["t"], part["err"] = S, R, t, err
     return part
 
 
