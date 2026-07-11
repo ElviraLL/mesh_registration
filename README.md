@@ -50,6 +50,17 @@ No landmarks and no knowledge of garment types:
    coverage get a second RANSAC pass against only the still-unclaimed
    surface (this also resolves both shoes landing on the same foot).
 
+#### Assumptions (fpfh)
+
+- The reference contains the same garments baked in (that is what makes
+  registration well-posed at all).
+- Assets share a canonical orientation (y-up, z-forward): candidate
+  rotations further than ~35° from the identity or the yaw flip are
+  rejected (`MAX_TILT_DEG` in `registration/global_reg.py`). Relax this if
+  your generator does not normalize orientation.
+- Runs are seeded (`--seed`); on CPU the RANSAC stage is the main source
+  of run-to-run variance, so keep the seed fixed for reproducibility.
+
 ### `--method landmarks` (fast, avatar-convention specific)
 
 Hand-crafted geometric landmarks on the y-up T-pose avatar (head top, hand

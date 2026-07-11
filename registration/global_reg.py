@@ -25,6 +25,7 @@ from .icp import trimmed_icp, apply_srt, yaw_matrix
 from .backend import NNIndex, use_torch, ransac_correspondences
 
 SCALE_GRID = np.geomspace(0.08, 1.35, 10)
+RETRY_SCALE_GRID = np.geomspace(0.08, 1.35, 16)
 
 # Resolution pyramid (in reference units; the avatar is ~1.0 tall). A fixed
 # voxel cannot serve both body-sized and shoe-sized garments: a small garment
@@ -166,6 +167,10 @@ def collect_candidates(
                 src_pts, ref_tree, ref_pts, s0 * s1, R, t,
                 src_nrm=src_nrm, tgt_nrm=ref_nrm,
             )
+            if not _near_canonical(R):
+                # ICP refinement is free to rotate and can drift a gated
+                # candidate far off canonical; re-check after refinement.
+                continue
             cand = _finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm)
             if cand["rel"] > 0.03:
                 # Still sloppy: retry from slightly perturbed poses.
@@ -175,7 +180,7 @@ def collect_candidates(
                         src_nrm=src_nrm, tgt_nrm=ref_nrm,
                     )
                     c2 = _finish(src_pts, s2, R2, t2, err2, ref_tree, ref_pts, ref_nrm)
-                    if c2["rel"] < cand["rel"]:
+                    if c2["rel"] < cand["rel"] and _near_canonical(c2["R"]):
                         cand = c2
             cands.append(cand)
     cands = [c for c in cands if c["rel"] < 0.12]

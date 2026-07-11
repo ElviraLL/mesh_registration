@@ -109,7 +109,12 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
                 improved = True
         if not improved:
             break
-    part["s"], part["R"], part["t"], part["err"] = S, R, t, err
+    from .global_reg import _near_canonical
+
+    if _near_canonical(R):
+        part["s"], part["R"], part["t"], part["err"] = S, R, t, err
+    # else: keep the pre-orientation transform; the polish drifted off the
+    # canonical orientation prior and cannot be trusted.
     return part
 
 
@@ -235,6 +240,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
         joint_select,
         split_parts,
         _coverage_weights,
+        RETRY_SCALE_GRID,
     )
 
     bodies = ("body", "body_bald")
@@ -293,6 +299,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
             e["cands"] = e["cands"] + collect_candidates(
                 e["src"][::3], {}, ref_pts, ref_tree, ref_nrm,
                 e.get("src_nrm")[::3] if e.get("src_nrm") is not None else None,
+                scales=RETRY_SCALE_GRID,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
             retried.append(e["part"])
