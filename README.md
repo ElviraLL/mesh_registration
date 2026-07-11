@@ -14,34 +14,56 @@ a nearly coincident counterpart region on its surface.
 
 ## Approach
 
-For each garment:
+Two interchangeable methods produce per-part similarity transforms
+(uniform scale + rotation + translation), refined by trimmed scaled ICP
+against surface samples of the reference (the reference contains the same
+garments baked in, so each garment snaps onto its counterpart region).
 
-1. **Landmarks** — geometric landmarks are extracted from the y-up T-pose
-   reference avatar (head top, hand tips, crotch, ankles, per-foot centers,
-   neck, torso center) and matching landmarks from the garment in its own
-   frame (e.g. sleeve tips for tops, crotch/hem for bottoms, per-shoe
-   centers and sole for shoes).
-2. **Similarity initialization** — the landmark correspondences give a
-   uniform scale + translation (plus 180° yaw candidates for orientation
-   ambiguity and a few scale perturbations).
-3. **Trimmed scaled ICP** — the initialization is refined against surface
-   samples of the reference avatar. Because the reference already contains
-   the same garment baked in, the garment snaps onto its counterpart region.
-   The target is cropped to the garment's moving bounding box and only the
-   best 70% of correspondences are used each iteration, so the rest of the
-   avatar does not pull the garment away.
+### `--method fpfh` (default; type-agnostic, generalizes to new avatars)
 
-Shoes are special-cased: a single similarity transform cannot match both
-the shoe size and the pair spacing (the generated pair is spaced differently
-than the avatar's stance), so the pair is split at the x gap between the two
-shoes and each shoe is registered to its own foot. The left/right assignment
-is chosen jointly by total ICP error.
+No landmarks and no knowledge of garment types:
+
+1. **Parts** — each mesh is split into spatially separate parts
+   (connected components merged by bounding-box overlap), so a shoe pair
+   becomes two independently-registered parts.
+2. **Candidates** — FPFH features + RANSAC with a closed-form similarity
+   solve (Umeyama with scaling) propose registrations. FPFH is not scale
+   invariant and the garment-to-avatar scale is unknown, so RANSAC runs
+   over a log-spaced grid of scale hypotheses, with the voxel/feature
+   resolution adapted to the scaled garment size and the reference
+   preprocessed once per resolution level. Sloppily converged candidates
+   are re-polished from perturbed poses.
+3. **Joint selection** — one candidate per part is chosen by coordinate
+   descent on a single area-currency objective:
+
+   `net = marginal soft coverage of the reference − β · floating_fraction · (part_area · s² / ref_area)`
+
+   The reference surface is the union of the garments, so the correct
+   joint solution tiles it. This objective is scale-fair where per-part
+   scores are not: absolute fit error favors shrunken fits hiding in
+   surface folds, relative error favors inflated fits "tarping" large
+   regions - but a shrunken fit explains almost no area, and an inflated
+   fit pays s²-growing cost for the surface it brings that lands nowhere.
+   The body participates as a down-weighted background layer (it sits
+   under the clothes but its claim on the skin stops garments from
+   freeloading on the face/hands), and parts left with near-zero marginal
+   coverage get a second RANSAC pass against only the still-unclaimed
+   surface (this also resolves both shoes landing on the same foot).
+
+### `--method landmarks` (fast, avatar-convention specific)
+
+Hand-crafted geometric landmarks on the y-up T-pose avatar (head top, hand
+tips, crotch detected by the silhouette splitting into two legs, per-foot
+centers) matched to per-garment-type landmarks (sleeve tips, crotch/hem,
+per-shoe centers and sole), giving the similarity initialization directly.
+Shoes are split at the x gap and assigned to feet jointly by ICP error.
 
 ## Usage
 
 ```bash
 pip install -r requirements.txt
-python -m registration.register --data data --out output
+python -m registration.register --data data --out output            # fpfh
+python -m registration.register --data data --out output --method landmarks
 ```
 
 ## Outputs (`output/`)

@@ -52,6 +52,7 @@ def trimmed_icp(
     with_scale=True,
     crop_margin=0.06,
     tol=1e-7,
+    scale_bounds=(0.6, 1.6),
 ):
     """Trimmed ICP estimating a similarity transform.
 
@@ -63,9 +64,15 @@ def trimmed_icp(
     crop_margin   : target points outside the transformed source's bounding
                     box (expanded by this margin) are ignored, so the garment
                     only registers against its own region of the avatar.
+    scale_bounds  : allowed scale range relative to the initial scale.
+                    Unbounded scale estimation collapses the source onto the
+                    target surface (a shrunken object always has a lower
+                    absolute point-to-surface error), so the scale may only
+                    move this far from the initialization.
 
     Returns (s, R, t, err) where err is the mean kept-pair distance.
     """
+    s_lo, s_hi = scale_bounds[0] * s, scale_bounds[1] * s
     prev_err = np.inf
     err = np.inf
     for _ in range(iters):
@@ -87,7 +94,29 @@ def trimmed_icp(
             break
         prev_err = err
         s, R, t = umeyama(src[keep], tpts[idx[keep]], with_scale=with_scale)
+        if with_scale and not (s_lo <= s <= s_hi):
+            s_clamped = float(np.clip(s, s_lo, s_hi))
+            # Re-solve the translation for the clamped scale.
+            _, R, t = umeyama(s_clamped * src[keep], tpts[idx[keep]], with_scale=False)
+            s = s_clamped
+            R = R.copy()
+            t = t.copy()
     return s, R, t, err
+
+
+def fit_score(src_pts, s, R, t, ref_tree):
+    """Scale-fair fit quality for comparing competing registrations.
+
+    Mean UNtrimmed point-to-reference distance, normalized by scale.
+    - Trimmed error hides the part of the garment that sticks out of a
+      wrong region, so trimming cannot be used for selection.
+    - Absolute error favors collapsed (shrunken) fits; relative trimmed
+      error favors inflated fits onto large smooth regions. The untrimmed
+      relative error exposes both: a garment registered to its true
+      counterpart region lies on the reference over its WHOLE surface.
+    """
+    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t), workers=-1)
+    return d.mean() / s
 
 
 def yaw_matrix(degrees):

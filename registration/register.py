@@ -3,10 +3,11 @@
 Usage:
     python -m registration.register --data data --out output
 
-Each garment gets a landmark-based similarity initialization, then a trimmed
-scaled ICP refinement against the reference "one piece" avatar (which has the
-same garments baked in). Several initializations (yaw flips, scale
-perturbations) are tried and the one with the lowest ICP error wins.
+Every garment ends up with per-part similarity transforms refined by trimmed
+scaled ICP against the reference "one piece" avatar (which has the same
+garments baked in). Initialization comes from either type-agnostic global
+registration with joint coverage selection (--method fpfh, default; see
+global_reg.py) or hand-crafted T-pose landmarks (--method landmarks).
 """
 
 import argparse
@@ -23,7 +24,7 @@ from .landmarks import (
     shoes_landmarks,
     tops_landmarks,
 )
-from .icp import trimmed_icp, compose, yaw_matrix
+from .icp import trimmed_icp, compose, yaw_matrix, fit_score
 
 REFERENCE = "3d_generated_mesh_one_piece_avatar_body_processed.glb"
 
@@ -143,17 +144,110 @@ INITIALIZERS = {
 
 
 def _refine(src, ref_pts, ref_tree, inits):
-    best = None
+    best, best_score = None, np.inf
     for s0, R0, t0 in inits:
         s, R, t, err = trimmed_icp(src, ref_tree, ref_pts, s0, R0, t0)
-        if best is None or err < best[3]:
-            best = (s, R, t, err)
+        score = fit_score(src, s, R, t, ref_tree)
+        if score < best_score:
+            best, best_score = (s, R, t, err), score
     return best
 
 
-def _side_submesh(mesh, vmask):
+def _mask_submesh(mesh, vmask):
     fmask = vmask[mesh.faces].all(axis=1)
     return mesh.submesh([np.where(fmask)[0]], append=True)
+
+
+
+def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
+                      n_src=30000):
+    """Type-agnostic registration of every garment: candidates + joint pick.
+
+    Phase A collects FPFH+RANSAC candidates per spatially-separate part.
+    Phase B picks each body candidate standalone (bodies are unambiguous:
+    they explain by far the most area), then selects the garments jointly
+    against the body as a down-weighted background layer - the body sits
+    UNDER the clothes, so garments override it, but its claim on the skin
+    (face, hands) stops an inflated garment from freeloading there.
+    Parts that end up explaining almost nothing get a coverage-guided
+    RANSAC retry against only the still-unclaimed surface.
+    """
+    from .global_reg import (
+        collect_candidates,
+        joint_select,
+        split_parts,
+        _coverage_weights,
+    )
+
+    bodies = ("body", "body_bald")
+    entries = []
+    for name, (scene, mesh) in loaded.items():
+        masks = split_parts(mesh)
+        for i, vmask in enumerate(masks):
+            sub = _mask_submesh(mesh, vmask)
+            src = sample(sub, n_src)
+            cands = collect_candidates(src, ref_cache, ref_pts, ref_tree)
+            label = name if len(masks) == 1 else f"{name}_part{i}"
+            entries.append(
+                {"name": name, "part": label, "mask": vmask,
+                 "src": src, "area": sub.area, "cands": cands}
+            )
+            print(f"[..]   {label}: {len(cands)} candidates")
+
+    n_ref = len(ref_pts)
+
+    def solo_net(e, c, w):
+        return w.sum() / n_ref - 0.5 * c["float"] * (e["area"] * c["s"] ** 2 / ref_area)
+
+    background = np.zeros(n_ref, dtype=np.float32)
+    for e in entries:
+        if e["name"] in bodies:
+            e["weights"] = [
+                _coverage_weights(e["src"], c, ref_pts) for c in e["cands"]
+            ]
+            k = int(np.argmax([
+                solo_net(e, c, w) for c, w in zip(e["cands"], e["weights"])
+            ]))
+            e["chosen"] = e["cands"][k]
+            if e["name"] == "body_bald" or not background.any():
+                background = 0.5 * e["weights"][k]
+
+    garment_entries = [e for e in entries if e["name"] not in bodies]
+    chosen = joint_select(garment_entries, ref_pts, ref_area, background)
+
+    # Coverage-guided retry: a part whose chosen fit explains almost no
+    # exclusive area is mis-registered (e.g. both shoes landed on the same
+    # foot). Re-run RANSAC for it against only the unclaimed surface, where
+    # its true region no longer competes with the whole avatar.
+    weights = [e["weights"][ci] for e, ci in zip(garment_entries, chosen)]
+    retried = []
+    for i, e in enumerate(garment_entries):
+        others = background.copy()
+        for j, w in enumerate(weights):
+            if j != i:
+                others = np.maximum(others, w)
+        marginal = np.maximum(weights[i] - others, 0.0).sum() / n_ref
+        if marginal < 0.02:
+            e["cands"] = e["cands"] + collect_candidates(
+                e["src"], {}, ref_pts, ref_tree,
+                ransac_ref_pts=ref_pts[others < 0.5],
+            )
+            retried.append(e["part"])
+    if retried:
+        print(f"[..]   coverage retry: {', '.join(retried)}")
+        chosen = joint_select(garment_entries, ref_pts, ref_area, background)
+
+    for e, ci in zip(garment_entries, chosen):
+        e["chosen"] = e["cands"][ci]
+
+    parts_by_name = {}
+    for e in entries:
+        c = e["chosen"]
+        parts_by_name.setdefault(e["name"], []).append(
+            {"part": e["part"], "mask": e["mask"],
+             "s": c["s"], "R": c["R"], "t": c["t"], "err": c["err"]}
+        )
+    return parts_by_name
 
 
 def register_shoes(garment_mesh, ref_lm, ref_pts, ref_tree, n_src=8000):
@@ -179,7 +273,7 @@ def register_shoes(garment_mesh, ref_lm, ref_pts, ref_tree, n_src=8000):
     # results[garment_side][target_foot] = (s, R, t, err)
     results = {}
     for side, vmask in sides.items():
-        sub = _side_submesh(garment_mesh, vmask)
+        sub = _mask_submesh(garment_mesh, vmask)
         src = sample(sub, n_src)
         center = sub.vertices.mean(axis=0)
         sole_y = sub.vertices[:, 1].min()
@@ -230,23 +324,36 @@ def register_garment(name, garment_mesh, ref_lm, ref_pts, ref_tree, n_src=15000)
     ]
 
 
-def register_all(data_dir, out_dir, preview=True):
+def register_all(data_dir, out_dir, preview=True, method="landmarks"):
     os.makedirs(os.path.join(out_dir, "registered"), exist_ok=True)
 
     ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, REFERENCE))
     ref_lm = avatar_landmarks(ref_mesh.vertices)
     ref_pts = sample(ref_mesh, 120000)
     ref_tree = cKDTree(ref_pts)
+    ref_feat = {} if method == "fpfh" else None
 
-    results = {}
-    combined = trimesh.Scene()
+    loaded = {}
     for name, fname in GARMENTS.items():
         path = os.path.join(data_dir, fname)
         if not os.path.exists(path):
             print(f"[skip] {name}: {fname} not found")
             continue
-        g_scene, g_mesh = load_mesh(path)
-        parts = register_garment(name, g_mesh, ref_lm, ref_pts, ref_tree)
+        loaded[name] = load_mesh(path)
+
+    if method == "fpfh":
+        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_mesh.area)
+    else:
+        parts_by_name = {
+            name: register_garment(name, g_mesh, ref_lm, ref_pts, ref_tree)
+            for name, (g_scene, g_mesh) in loaded.items()
+        }
+
+    results = {}
+    combined = trimesh.Scene()
+    for name, (g_scene, g_mesh) in loaded.items():
+        fname = GARMENTS[name]
+        parts = parts_by_name[name]
 
         # Bake the per-part transforms into the vertices (a garment may have
         # several parts with different transforms, e.g. left/right shoe).
@@ -329,8 +436,16 @@ def main():
     ap.add_argument("--data", default="data")
     ap.add_argument("--out", default="output")
     ap.add_argument("--no-preview", action="store_true")
+    ap.add_argument(
+        "--method",
+        choices=["fpfh", "landmarks"],
+        default="fpfh",
+        help="fpfh: type-agnostic FPFH+RANSAC global registration with "
+        "joint coverage selection (generalizes to new avatars); "
+        "landmarks: fast hand-crafted T-pose landmark initialization",
+    )
     args = ap.parse_args()
-    register_all(args.data, args.out, preview=not args.no_preview)
+    register_all(args.data, args.out, preview=not args.no_preview, method=args.method)
 
 
 if __name__ == "__main__":
