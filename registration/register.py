@@ -293,6 +293,33 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
     for e, ci in zip(garment_entries, chosen):
         e["chosen"] = e["cands"][ci]
 
+    # Selection diagnostics: every candidate of every part with the terms
+    # of the joint objective, so a wrong pick can be diagnosed offline.
+    report = []
+    for e in garment_entries + [x for x in entries if x["name"] in bodies]:
+        others = background.copy()
+        for o in garment_entries:
+            if o is not e and "weights" in o and "chosen" in o:
+                others = np.maximum(
+                    others, o["weights"][o["cands"].index(o["chosen"])]
+                )
+        rows = []
+        ws = e.get("weights")
+        for k, c in enumerate(e["cands"]):
+            row = {"s": float(c["s"]), "rel": float(c["rel"]),
+                   "float": float(c["float"]), "chosen": c is e["chosen"]}
+            if ws is not None and k < len(ws):
+                row["total_cov"] = float(ws[k].sum() / n_ref)
+                row["marginal"] = float(
+                    np.maximum(ws[k] - others, 0.0).sum() / n_ref
+                )
+                row["net"] = row["marginal"] - 0.5 * c["float"] * (
+                    e["area"] * c["s"] ** 2 / ref_area
+                )
+            rows.append(row)
+        report.append({"part": e["part"], "cands": rows})
+    register_all_fpfh.last_report = report
+
     # Final polish of every chosen transform at full sample resolution.
     for e in entries:
         c = e["chosen"]
@@ -385,7 +412,8 @@ def register_garment(name, garment_mesh, ref_lm, ref_pts, ref_tree, n_src=15000)
     ]
 
 
-def register_all(data_dir, out_dir, preview=True, method="landmarks"):
+def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
+    np.random.seed(seed)
     os.makedirs(os.path.join(out_dir, "registered"), exist_ok=True)
 
     ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, REFERENCE))
@@ -404,6 +432,8 @@ def register_all(data_dir, out_dir, preview=True, method="landmarks"):
 
     if method == "fpfh":
         parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_mesh.area)
+        with open(os.path.join(out_dir, "selection_report.json"), "w") as f:
+            json.dump(getattr(register_all_fpfh, "last_report", []), f, indent=1)
     else:
         parts_by_name = {
             name: register_garment(name, g_mesh, ref_lm, ref_pts, ref_tree)
@@ -508,8 +538,12 @@ def main():
         "joint coverage selection (generalizes to new avatars); "
         "landmarks: fast hand-crafted T-pose landmark initialization",
     )
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    register_all(args.data, args.out, preview=not args.no_preview, method=args.method)
+    register_all(
+        args.data, args.out,
+        preview=not args.no_preview, method=args.method, seed=args.seed,
+    )
 
 
 if __name__ == "__main__":
