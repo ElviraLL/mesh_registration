@@ -26,16 +26,60 @@ from .landmarks import (
 )
 from .icp import trimmed_icp, compose, yaw_matrix, fit_score, oriented_score, rot180
 
-REFERENCE = "3d_generated_mesh_one_piece_avatar_body_processed.glb"
+# Garment-type inference from filenames, needed only by --method landmarks
+# (the fpfh method is type-agnostic and registers any mesh). Checked in
+# order; first hit wins.
+TYPE_KEYWORDS = [
+    ("body", "body"),
+    ("tops", "top"), ("tops", "shirt"), ("tops", "jacket"),
+    ("bottoms", "bottom"), ("bottoms", "pant"), ("bottoms", "trouser"),
+    ("shoes", "shoe"), ("shoes", "boot"), ("shoes", "feet"),
+    ("head_accessories", "head"), ("head_accessories", "helmet"),
+    ("head_accessories", "hat"), ("head_accessories", "hair"),
+]
 
-GARMENTS = {
-    "body": "3d_generated_mesh_body_processed.glb",
-    "body_bald": "3d_generated_mesh_body_bald_processed.glb",
-    "tops": "3d_generated_mesh_tops_processed.glb",
-    "bottoms": "3d_generated_mesh_bottoms_processed.glb",
-    "shoes": "3d_generated_mesh_shoes_processed.glb",
-    "head_accessories": "3d_generated_mesh_head_accessories_processed.glb",
-}
+
+def discover(data_dir):
+    """Find the reference and the garment meshes in a data directory.
+
+    The reference is the GLB whose filename contains "one_piece" (the
+    avatar with all garments baked in); every other .glb is a garment.
+    Returns (reference_filename, {name: filename}).
+    """
+    import glob as _glob
+
+    files = sorted(
+        os.path.basename(f)
+        for f in _glob.glob(os.path.join(data_dir, "*.glb"))
+    )
+    refs = [f for f in files if "one_piece" in f.lower()]
+    if len(refs) != 1:
+        raise SystemExit(
+            f"expected exactly one reference GLB with 'one_piece' in its "
+            f"name in {data_dir}, found {refs or 'none'}"
+        )
+    garments = {}
+    for f in files:
+        if f == refs[0]:
+            continue
+        name = os.path.splitext(f)[0]
+        for prefix in ("3d_generated_mesh_",):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        for suffix in ("_processed",):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        garments[name] = f
+    return refs[0], garments
+
+
+def garment_type(name):
+    """Infer the landmark-method garment type from a mesh name, or None."""
+    low = name.lower()
+    for gtype, kw in TYPE_KEYWORDS:
+        if kw in low:
+            return gtype
+    return None
 
 
 def load_mesh(path):
@@ -200,7 +244,6 @@ def _init_head(gv, ref_lm):
 
 INITIALIZERS = {
     "body": _init_body,
-    "body_bald": _init_body,
     "tops": _init_tops,
     "bottoms": _init_bottoms,
     "shoes": _init_shoes,
@@ -406,14 +449,15 @@ def register_shoes(garment_mesh, ref_lm, ref_pts, ref_tree, n_src=8000):
     return parts
 
 
-def register_garment(name, garment_mesh, ref_lm, ref_pts, ref_tree, n_src=15000):
+def register_garment(gtype, name, garment_mesh, ref_lm, ref_pts, ref_tree,
+                     n_src=15000):
     """Return a list of parts, each with a vertex mask and its transform."""
-    if name == "shoes":
+    if gtype == "shoes":
         return register_shoes(garment_mesh, ref_lm, ref_pts, ref_tree)
 
     gv = garment_mesh.vertices
     src = sample(garment_mesh, n_src)
-    inits = INITIALIZERS[name](gv, ref_lm)
+    inits = INITIALIZERS[gtype](gv, ref_lm)
     if not inits:
         inits = [(1.0, np.eye(3), np.zeros(3))]
     s, R, t, err = _refine(src, ref_pts, ref_tree, inits)
@@ -427,34 +471,39 @@ def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
     np.random.seed(seed)
     os.makedirs(os.path.join(out_dir, "registered"), exist_ok=True)
 
-    ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, REFERENCE))
+    reference, garments = discover(data_dir)
+    print(f"[..]   reference: {reference}")
+    ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, reference))
     ref_lm = avatar_landmarks(ref_mesh.vertices)
     ref_pts, ref_nrm = sample_with_normals(ref_mesh, 120000)
     ref_tree = NNIndex(ref_pts)
     ref_feat = {} if method == "fpfh" else None
 
     loaded = {}
-    for name, fname in GARMENTS.items():
-        path = os.path.join(data_dir, fname)
-        if not os.path.exists(path):
-            print(f"[skip] {name}: {fname} not found")
-            continue
-        loaded[name] = load_mesh(path)
+    for name, fname in garments.items():
+        loaded[name] = load_mesh(os.path.join(data_dir, fname))
 
     if method == "fpfh":
         parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area)
         with open(os.path.join(out_dir, "selection_report.json"), "w") as f:
             json.dump(getattr(register_all_fpfh, "last_report", []), f, indent=1)
     else:
-        parts_by_name = {
-            name: register_garment(name, g_mesh, ref_lm, ref_pts, ref_tree)
-            for name, (g_scene, g_mesh) in loaded.items()
-        }
+        parts_by_name = {}
+        for name, (g_scene, g_mesh) in loaded.items():
+            gtype = garment_type(name)
+            if gtype is None:
+                print(f"[skip] {name}: no landmark rules for this type; "
+                      f"use --method fpfh for arbitrary garments")
+                continue
+            parts_by_name[name] = register_garment(
+                gtype, name, g_mesh, ref_lm, ref_pts, ref_tree
+            )
+        loaded = {n: m for n, m in loaded.items() if n in parts_by_name}
 
     results = {}
     combined = trimesh.Scene()
     for name, (g_scene, g_mesh) in loaded.items():
-        fname = GARMENTS[name]
+        fname = garments[name]
         parts = [
             orient_and_polish(g_mesh, p, ref_tree, ref_pts, ref_nrm)
             for p in parts_by_name[name]
