@@ -75,7 +75,7 @@ def _preprocess(points, voxel):
     return pcd, fpfh
 
 
-def _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
+def _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist, seed=None):
     """One global-registration attempt; returns a 4x4 similarity or None."""
     if use_torch():
         T, n_inliers = ransac_correspondences(
@@ -84,6 +84,7 @@ def _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
             np.asarray(dst_pcd.points),
             np.asarray(dst_fpfh.data).T,
             dist,
+            seed=seed,
         )
         return T if n_inliers >= 10 else None
     res = _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist)
@@ -150,7 +151,11 @@ def collect_candidates(
         if use_torch():
             attempts += 1  # attempts are cheap on the GPU
         for attempt in range(attempts):
-            T = _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, 3 * voxel)
+            # Deterministic per-hypothesis seed so GPU runs are reproducible.
+            T = _global_match(
+                src_pcd, src_fpfh, dst_pcd, dst_fpfh, 3 * voxel,
+                seed=attempt * 7919 + int(s0 * 1000),
+            )
             if T is None:
                 continue
             s1, R, t = _decompose_similarity(T)

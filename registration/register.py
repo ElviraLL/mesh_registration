@@ -89,27 +89,29 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
     )
     score = oriented_score(src, src_nrm, S, R, t, ref_tree, ref_nrm)
 
-    # Iterate the flip test to a fixed point: a flip variant polished from a
-    # poor starting pose can converge short of its best and lose the score
-    # comparison unfairly, so whenever a flip wins, re-test from the new
-    # (better-converged) pose. The score strictly decreases, so this stops.
-    for _ in range(3):
-        improved = False
-        for Q in (rot180(1),):  # yaw flip; other axes violate the y-up prior
-            # Rotate the part 180 degrees about its own centroid axis.
-            R2 = R @ Q
-            t2 = t + R @ (center - Q @ center)
-            _, R3, t3, err3 = trimmed_icp(
-                srcS, ref_tree, ref_pts, 1.0, R2, t2,
-                src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
-            )
-            sc3 = oriented_score(src, src_nrm, S, R3, t3, ref_tree, ref_nrm)
-            if sc3 < score:
-                R, t, err, score = R3, t3, err3, sc3
-                improved = True
-        if not improved:
-            break
-    from .global_reg import _near_canonical
+    # Yaw-flip test with an identity-preferring tie-break: generated assets
+    # face forward, and for a near-symmetric part (helmet dome) the
+    # geometric score difference between forward and backward sits inside
+    # sampling noise. Adopt whichever variant is closer to the identity
+    # unless the other is decisively (>10%) better.
+    Q = rot180(1)
+    R2 = R @ Q
+    t2 = t + R @ (center - Q @ center)
+    _, R3, t3, err3 = trimmed_icp(
+        srcS, ref_tree, ref_pts, 1.0, R2, t2,
+        src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
+    )
+    sc3 = oriented_score(src, src_nrm, S, R3, t3, ref_tree, ref_nrm)
+
+    from .global_reg import _near_canonical, _rotation_angle_deg
+
+    cur_first = _rotation_angle_deg(R) <= _rotation_angle_deg(R3)
+    if cur_first:
+        take_flip = sc3 < 0.9 * score
+    else:
+        take_flip = not (score < 0.9 * sc3)
+    if take_flip:
+        R, t, err, score = R3, t3, err3, sc3
 
     if _near_canonical(R):
         part["s"], part["R"], part["t"], part["err"] = S, R, t, err
@@ -336,14 +338,6 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
             rows.append(row)
         report.append({"part": e["part"], "cands": rows})
     register_all_fpfh.last_report = report
-
-    # Final polish of every chosen transform at full sample resolution.
-    for e in entries:
-        c = e["chosen"]
-        s_, R_, t_, err_ = trimmed_icp(
-            e["src"], ref_tree, ref_pts, c["s"], c["R"], c["t"]
-        )
-        e["chosen"] = {**c, "s": s_, "R": R_, "t": t_, "err": err_}
 
     parts_by_name = {}
     for e in entries:

@@ -73,9 +73,20 @@ Shoes are split at the x gap and assigned to feet jointly by ICP error.
 
 ```bash
 pip install -r requirements.txt
+# GPU machine (recommended for --method fpfh):
+pip install torch
 python -m registration.register --data data --out output            # fpfh
+# CPU-only: the landmark method is deterministic and fast
 python -m registration.register --data data --out output --method landmarks
 ```
+
+On CPU the fpfh method's RANSAC budget is the reliability bottleneck: the
+small parts' (helmet, shoes) true-scale candidates are found only in a
+fraction of attempts, and no selection logic can recover a candidate that
+was never generated. With the GPU budget (more attempts, 200k hypotheses
+per attempt, per-hypothesis seeding) candidate generation is reliable and
+reproducible. `output/` in this repo was produced with the landmark
+method.
 
 ## GPU acceleration
 
