@@ -77,7 +77,7 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
 
     s, R, t, err = trimmed_icp(
         src, ref_tree, ref_pts, part["s"], part["R"], part["t"],
-        src_nrm=src_nrm, tgt_nrm=ref_nrm,
+        src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
     )
     score = oriented_score(src, src_nrm, s, R, t, ref_tree, ref_nrm)
 
@@ -94,7 +94,7 @@ def orient_and_polish(mesh, part, ref_tree, ref_pts, ref_nrm, n_src=15000):
             t2 = t + s * R @ (center - Q @ center)
             s3, R3, t3, err3 = trimmed_icp(
                 src, ref_tree, ref_pts, s, R2, t2,
-                src_nrm=src_nrm, tgt_nrm=ref_nrm,
+                src_nrm=src_nrm, tgt_nrm=ref_nrm, with_scale=False,
             )
             sc3 = oriented_score(src, src_nrm, s3, R3, t3, ref_tree, ref_nrm)
             if sc3 < score:
@@ -210,7 +210,7 @@ def _mask_submesh(mesh, vmask):
 
 
 
-def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
+def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                       n_src=30000):
     """Type-agnostic registration of every garment: candidates + joint pick.
 
@@ -239,7 +239,9 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
             src = sample(sub, n_src)
             # ICP refinement of the many candidates runs on a subsample;
             # coverage weights and the final polish use the full set.
-            cands = collect_candidates(src[::3], ref_cache, ref_pts, ref_tree)
+            cands = collect_candidates(
+                src[::3], ref_cache, ref_pts, ref_tree, ref_nrm
+            )
             label = name if len(masks) == 1 else f"{name}_part{i}"
             entries.append(
                 {"name": name, "part": label, "mask": vmask,
@@ -282,7 +284,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
         marginal = np.maximum(weights[i] - others, 0.0).sum() / n_ref
         if marginal < 0.02:
             e["cands"] = e["cands"] + collect_candidates(
-                e["src"][::3], {}, ref_pts, ref_tree,
+                e["src"][::3], {}, ref_pts, ref_tree, ref_nrm,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
             retried.append(e["part"])
@@ -431,7 +433,7 @@ def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
         loaded[name] = load_mesh(path)
 
     if method == "fpfh":
-        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_mesh.area)
+        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area)
         with open(os.path.join(out_dir, "selection_report.json"), "w") as f:
             json.dump(getattr(register_all_fpfh, "last_report", []), f, indent=1)
     else:

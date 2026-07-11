@@ -99,7 +99,8 @@ def _decompose_similarity(T):
 
 
 def collect_candidates(
-    src_pts, ref_cache, ref_pts, ref_tree, scales=SCALE_GRID, ransac_ref_pts=None
+    src_pts, ref_cache, ref_pts, ref_tree, ref_nrm,
+    scales=SCALE_GRID, ransac_ref_pts=None,
 ):
     """Collect registration candidates for one part across scale hypotheses.
 
@@ -136,7 +137,7 @@ def collect_candidates(
                 # neighboring hypothesis covers that scale.
                 continue
             s, R, t, err = trimmed_icp(src_pts, ref_tree, ref_pts, s0 * s1, R, t)
-            cand = _finish(src_pts, s, R, t, err, ref_tree)
+            cand = _finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm)
             if cand["rel"] > 0.03:
                 # Sloppy convergence: a true fit stuck in a shallow local
                 # minimum loses the joint selection to parasites, so try to
@@ -145,7 +146,7 @@ def collect_candidates(
                     s2, R2, t2, err2 = trimmed_icp(
                         src_pts, ref_tree, ref_pts, s, yaw_matrix(ang) @ R, t
                     )
-                    c2 = _finish(src_pts, s2, R2, t2, err2, ref_tree)
+                    c2 = _finish(src_pts, s2, R2, t2, err2, ref_tree, ref_pts, ref_nrm)
                     if c2["rel"] < cand["rel"]:
                         cand = c2
             cands.append(cand)
@@ -154,37 +155,45 @@ def collect_candidates(
         s, R, t, err = trimmed_icp(
             src_pts, ref_tree, ref_pts, 1.0, np.eye(3), np.zeros(3)
         )
-        cands.append(_finish(src_pts, s, R, t, err, ref_tree))
+        cands.append(_finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm))
     return cands
 
 
-def _finish(src_pts, s, R, t, err, ref_tree, tau=0.012):
+def _finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm, tau=0.012):
     """Package a refined candidate with its quality statistics.
 
     rel   : mean untrimmed distance to the reference, relative to scale.
-    float : fraction of the garment's surface samples farther than tau from
-            the reference surface, i.e. "floating in air". A garment truly
-            baked into the reference cannot float (apart from hidden inner
-            layers), so this is the scale-fair badness measure.
+    float : fraction of the garment's samples farther than tau from the
+            reference surface AND on its outside - hovering in air. A
+            garment truly baked into the reference cannot hover (an
+            inflated "tarp" fit must), so this is the scale-fair badness
+            measure. Points beyond tau on the INSIDE are hidden inner
+            layers (a garment's lining tucked behind the visible surface)
+            and are legitimate, so they are not counted.
     """
-    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t))
+    cur = apply_srt(src_pts, s, R, t)
+    d, idx = ref_tree.query(cur)
+    outside = ((cur - ref_pts[idx]) * ref_nrm[idx]).sum(axis=1) > 0.0
     return {
         "s": s, "R": R, "t": t, "err": err,
-        "rel": d.mean() / s, "float": float((d > tau).mean()),
+        "rel": d.mean() / s,
+        "float": float(((d > tau) & outside).mean()),
     }
 
 
 def _coverage_weights(src_pts, cand, ref_pts, tau=0.012):
     """Soft per-reference-point coverage in [0, 1].
 
-    1 at distance 0, falling linearly to 0 at tau. Binary coverage lets an
-    inflated fit "tarp over" a region it only crosses roughly; the soft
-    weight scores that region low while a true, tight fit scores near 1.
+    1 at distance 0, falling to 0 at tau. Binary coverage lets an inflated
+    fit "tarp over" a region it only crosses roughly; the soft weight
+    scores that region low while a true, tight fit scores near 1.
     """
     cur = apply_srt(src_pts, cand["s"], cand["R"], cand["t"])
     d, _ = NNIndex(cur).query(ref_pts)
     d = np.minimum(d, tau)
-    return (1.0 - d / tau).astype(np.float32)
+    # Quadratic falloff: sloppy within-tau coverage (an oversized part
+    # grazing the region) earns far less than tight contact.
+    return ((1.0 - d / tau) ** 2).astype(np.float32)
 
 
 def joint_select(parts, ref_pts, ref_area, background=None, beta=0.5,
