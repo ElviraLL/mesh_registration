@@ -1,7 +1,8 @@
 """Similarity-transform estimation and trimmed scaled ICP."""
 
 import numpy as np
-from scipy.spatial import cKDTree
+
+from .backend import NNIndex
 
 
 def umeyama(src, dst, with_scale=True):
@@ -57,7 +58,7 @@ def trimmed_icp(
     """Trimmed ICP estimating a similarity transform.
 
     src           : (N, 3) source sample points (garment).
-    target_tree   : cKDTree over target_pts (reference surface samples).
+    target_tree   : NNIndex over target_pts (reference surface samples).
     target_pts    : (M, 3) reference sample points.
     s, R, t       : initial similarity transform.
     trim          : fraction of best-matching pairs kept each iteration.
@@ -82,12 +83,12 @@ def trimmed_icp(
         hi = cur.max(axis=0) + crop_margin
         box = np.all((target_pts >= lo) & (target_pts <= hi), axis=1)
         if box.sum() > 500:
-            tree = cKDTree(target_pts[box])
+            tree = NNIndex(target_pts[box])
             tpts = target_pts[box]
         else:
             tree, tpts = target_tree, target_pts
 
-        d, idx = tree.query(cur, workers=-1)
+        d, idx = tree.query(cur)
         keep = np.argsort(d)[: max(int(len(d) * trim), 100)]
         err = d[keep].mean()
         if abs(prev_err - err) < tol:
@@ -115,7 +116,7 @@ def fit_score(src_pts, s, R, t, ref_tree):
       relative error exposes both: a garment registered to its true
       counterpart region lies on the reference over its WHOLE surface.
     """
-    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t), workers=-1)
+    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t))
     return d.mean() / s
 
 

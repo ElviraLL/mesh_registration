@@ -16,7 +16,7 @@ import os
 
 import numpy as np
 import trimesh
-from scipy.spatial import cKDTree
+from .backend import NNIndex
 
 from .landmarks import (
     avatar_landmarks,
@@ -340,7 +340,7 @@ def register_all(data_dir, out_dir, preview=True, method="landmarks"):
     ref_scene, ref_mesh = load_mesh(os.path.join(data_dir, REFERENCE))
     ref_lm = avatar_landmarks(ref_mesh.vertices)
     ref_pts = sample(ref_mesh, 120000)
-    ref_tree = cKDTree(ref_pts)
+    ref_tree = NNIndex(ref_pts)
     ref_feat = {} if method == "fpfh" else None
 
     loaded = {}

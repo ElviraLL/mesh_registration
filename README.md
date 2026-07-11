@@ -66,6 +66,23 @@ python -m registration.register --data data --out output            # fpfh
 python -m registration.register --data data --out output --method landmarks
 ```
 
+## GPU acceleration
+
+The two hot spots - nearest-neighbor queries inside trimmed ICP / coverage
+scoring, and RANSAC hypothesis testing - run on the GPU automatically when
+PyTorch with CUDA is installed (`pip install torch`):
+
+- NN queries become exact chunked brute-force distance minimization.
+- FPFH+RANSAC is replaced by a batched GPU RANSAC: mutual feature matches,
+  ~150k minimal sets solved by batched closed-form Umeyama, inliers counted
+  in parallel (`registration/backend.py`).
+
+Control with `REG_DEVICE=auto|cuda|cpu` (default `auto`). Without torch or
+a GPU everything falls back to scipy/Open3D on CPU; `--method fpfh` then
+takes minutes rather than seconds (`--method landmarks` runs in under a
+minute on CPU and is a good fast path when the avatar follows the y-up
+T-pose convention).
+
 ## Outputs (`output/`)
 
 - `registered/<name>_registered.glb` — each garment transformed into the

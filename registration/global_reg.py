@@ -17,8 +17,12 @@ import numpy as np
 import open3d as o3d
 import trimesh
 
+# Reproducible CPU RANSAC (the torch path seeds its own generator).
+if hasattr(o3d.utility, "random"):
+    o3d.utility.random.seed(0)
+
 from .icp import trimmed_icp, apply_srt, yaw_matrix
-from scipy.spatial import cKDTree
+from .backend import NNIndex, use_torch, ransac_correspondences
 
 SCALE_GRID = np.geomspace(0.08, 1.35, 10)
 
@@ -47,6 +51,23 @@ def _preprocess(points, voxel):
         pcd, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 5, max_nn=100)
     )
     return pcd, fpfh
+
+
+def _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
+    """One global-registration attempt; returns a 4x4 similarity or None."""
+    if use_torch():
+        T, n_inliers = ransac_correspondences(
+            np.asarray(src_pcd.points),
+            np.asarray(src_fpfh.data).T,
+            np.asarray(dst_pcd.points),
+            np.asarray(dst_fpfh.data).T,
+            dist,
+        )
+        return T if n_inliers >= 10 else None
+    res = _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist)
+    if len(res.correspondence_set) < 10:
+        return None
+    return np.asarray(res.transformation)
 
 
 def _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
@@ -102,11 +123,14 @@ def collect_candidates(
         # by any later selection logic, so take several attempts on the fine
         # resolution levels where it actually fails (small garments); the
         # coarse levels for large garments are reliable with one.
-        for _ in range(2 if voxel < 0.02 else 1):
-            res = _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist=3 * voxel)
-            if len(res.correspondence_set) < 10:
+        attempts = 2 if voxel < 0.02 else 1
+        if use_torch():
+            attempts += 1  # attempts are cheap on the GPU
+        for attempt in range(attempts):
+            T = _global_match(src_pcd, src_fpfh, dst_pcd, dst_fpfh, 3 * voxel)
+            if T is None:
                 continue
-            s1, R, t = _decompose_similarity(np.asarray(res.transformation))
+            s1, R, t = _decompose_similarity(T)
             if not np.isfinite(s1) or not (0.4 <= s1 <= 2.5):
                 # RANSAC collapsed or drifted far from this hypothesis; a
                 # neighboring hypothesis covers that scale.
@@ -143,7 +167,7 @@ def _finish(src_pts, s, R, t, err, ref_tree, tau=0.012):
             baked into the reference cannot float (apart from hidden inner
             layers), so this is the scale-fair badness measure.
     """
-    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t), workers=-1)
+    d, _ = ref_tree.query(apply_srt(src_pts, s, R, t))
     return {
         "s": s, "R": R, "t": t, "err": err,
         "rel": d.mean() / s, "float": float((d > tau).mean()),
@@ -158,8 +182,8 @@ def _coverage_weights(src_pts, cand, ref_pts, tau=0.012):
     weight scores that region low while a true, tight fit scores near 1.
     """
     cur = apply_srt(src_pts, cand["s"], cand["R"], cand["t"])
-    d, _ = cKDTree(cur).query(ref_pts, distance_upper_bound=tau, workers=-1)
-    d = np.where(np.isfinite(d), d, tau)
+    d, _ = NNIndex(cur).query(ref_pts)
+    d = np.minimum(d, tau)
     return (1.0 - d / tau).astype(np.float32)
 
 

@@ -4,3 +4,7 @@ trimesh
 networkx
 pygltflib
 matplotlib
+open3d
+
+# optional, enables GPU acceleration when CUDA is available:
+# torch
