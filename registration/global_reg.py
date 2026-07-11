@@ -120,7 +120,7 @@ def _decompose_similarity(T):
 
 
 def collect_candidates(
-    src_pts, ref_cache, ref_pts, ref_tree, ref_nrm,
+    src_pts, ref_cache, ref_pts, ref_tree, ref_nrm, src_nrm=None,
     scales=SCALE_GRID, ransac_ref_pts=None,
 ):
     """Collect registration candidates for one part across scale hypotheses.
@@ -159,15 +159,20 @@ def collect_candidates(
                 continue
             if not _near_canonical(R):
                 continue
-            s, R, t, err = trimmed_icp(src_pts, ref_tree, ref_pts, s0 * s1, R, t)
+            # Normal-consistent refinement: wrong-side correspondences are
+            # what drag a near-true candidate into a shallow local minimum,
+            # and a sloppy near-true candidate loses the joint selection.
+            s, R, t, err = trimmed_icp(
+                src_pts, ref_tree, ref_pts, s0 * s1, R, t,
+                src_nrm=src_nrm, tgt_nrm=ref_nrm,
+            )
             cand = _finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm)
             if cand["rel"] > 0.03:
-                # Sloppy convergence: a true fit stuck in a shallow local
-                # minimum loses the joint selection to parasites, so try to
-                # polish it from slightly perturbed poses.
+                # Still sloppy: retry from slightly perturbed poses.
                 for ang in (-10.0, 10.0):
                     s2, R2, t2, err2 = trimmed_icp(
-                        src_pts, ref_tree, ref_pts, s, yaw_matrix(ang) @ R, t
+                        src_pts, ref_tree, ref_pts, s, yaw_matrix(ang) @ R, t,
+                        src_nrm=src_nrm, tgt_nrm=ref_nrm,
                     )
                     c2 = _finish(src_pts, s2, R2, t2, err2, ref_tree, ref_pts, ref_nrm)
                     if c2["rel"] < cand["rel"]:

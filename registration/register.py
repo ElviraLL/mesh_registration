@@ -243,16 +243,16 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
         masks = split_parts(mesh)
         for i, vmask in enumerate(masks):
             sub = _mask_submesh(mesh, vmask)
-            src = sample(sub, n_src)
+            src, src_nrm = sample_with_normals(sub, n_src)
             # ICP refinement of the many candidates runs on a subsample;
             # coverage weights and the final polish use the full set.
             cands = collect_candidates(
-                src[::3], ref_cache, ref_pts, ref_tree, ref_nrm
+                src[::3], ref_cache, ref_pts, ref_tree, ref_nrm, src_nrm[::3]
             )
             label = name if len(masks) == 1 else f"{name}_part{i}"
             entries.append(
-                {"name": name, "part": label, "mask": vmask,
-                 "src": src, "area": sub.area, "cands": cands}
+                {"name": name, "part": label, "mask": vmask, "src": src,
+                 "src_nrm": src_nrm, "area": sub.area, "cands": cands}
             )
             print(f"[..]   {label}: {len(cands)} candidates")
 
@@ -292,6 +292,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
         if marginal < 0.02:
             e["cands"] = e["cands"] + collect_candidates(
                 e["src"][::3], {}, ref_pts, ref_tree, ref_nrm,
+                e.get("src_nrm")[::3] if e.get("src_nrm") is not None else None,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
             retried.append(e["part"])
