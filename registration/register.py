@@ -186,7 +186,9 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
         for i, vmask in enumerate(masks):
             sub = _mask_submesh(mesh, vmask)
             src = sample(sub, n_src)
-            cands = collect_candidates(src, ref_cache, ref_pts, ref_tree)
+            # ICP refinement of the many candidates runs on a subsample;
+            # coverage weights and the final polish use the full set.
+            cands = collect_candidates(src[::3], ref_cache, ref_pts, ref_tree)
             label = name if len(masks) == 1 else f"{name}_part{i}"
             entries.append(
                 {"name": name, "part": label, "mask": vmask,
@@ -229,7 +231,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
         marginal = np.maximum(weights[i] - others, 0.0).sum() / n_ref
         if marginal < 0.02:
             e["cands"] = e["cands"] + collect_candidates(
-                e["src"], {}, ref_pts, ref_tree,
+                e["src"][::3], {}, ref_pts, ref_tree,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
             retried.append(e["part"])
@@ -239,6 +241,14 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_area,
 
     for e, ci in zip(garment_entries, chosen):
         e["chosen"] = e["cands"][ci]
+
+    # Final polish of every chosen transform at full sample resolution.
+    for e in entries:
+        c = e["chosen"]
+        s_, R_, t_, err_ = trimmed_icp(
+            e["src"], ref_tree, ref_pts, c["s"], c["R"], c["t"]
+        )
+        e["chosen"] = {**c, "s": s_, "R": R_, "t": t_, "err": err_}
 
     parts_by_name = {}
     for e in entries:

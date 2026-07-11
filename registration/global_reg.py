@@ -65,7 +65,7 @@ def _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(dist),
         ],
-        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(400000, 0.9999),
+        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(150000, 0.9999),
     )
 
 
@@ -99,8 +99,10 @@ def collect_candidates(
         dst_pcd, dst_fpfh = ref_cache[voxel]
         src_pcd, src_fpfh = _preprocess(src_pts * s0, voxel)
         # RANSAC is stochastic and a missing true candidate cannot be fixed
-        # by any later selection logic, so take several attempts.
-        for _ in range(2):
+        # by any later selection logic, so take several attempts on the fine
+        # resolution levels where it actually fails (small garments); the
+        # coarse levels for large garments are reliable with one.
+        for _ in range(2 if voxel < 0.02 else 1):
             res = _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist=3 * voxel)
             if len(res.correspondence_set) < 10:
                 continue
