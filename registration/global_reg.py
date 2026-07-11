@@ -35,11 +35,10 @@ SCALE_GRID = np.geomspace(0.08, 1.35, 10)
 VOXEL_LEVELS = (0.02, 0.013, 0.008, 0.005)
 
 # Generated assets share a canonical orientation (y-up, z-forward); a correct
-# registration only ever needs a small tilt on top of an axis-aligned yaw
-# (0/90/180/270 degrees). Candidates rotated further than this are RANSAC
-# artifacts and are rejected outright - large-angle wrong-orientation fits
-# are exactly the ones point-distance ICP cannot repair and scoring finds
-# hardest to reject.
+# registration only ever needs a small tilt on top of the identity or the
+# yaw flip. Candidates rotated further are RANSAC artifacts and are rejected
+# outright - large-angle wrong-orientation fits are exactly the ones
+# point-distance ICP cannot repair and scoring finds hardest to reject.
 MAX_TILT_DEG = 35.0
 
 
@@ -48,9 +47,12 @@ def _rotation_angle_deg(R):
 
 
 def _near_canonical(R, max_tilt=MAX_TILT_DEG):
+    # Yaw 0 or 180 only: correct fits across this asset family are always a
+    # small tilt on the identity or on the yaw flip; 90-degree yaws let
+    # sideways parasite fits through.
     return any(
         _rotation_angle_deg(R @ yaw_matrix(-a)) <= max_tilt
-        for a in (0.0, 90.0, 180.0, 270.0)
+        for a in (0.0, 180.0)
     )
 
 
@@ -105,7 +107,7 @@ def _ransac(src_pcd, src_fpfh, dst_pcd, dst_fpfh, dist):
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(dist),
         ],
-        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(150000, 0.9999),
+        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(300000, 0.9999),
     )
 
 
