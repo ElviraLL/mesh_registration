@@ -325,6 +325,14 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
                 sub, ref_tree, ref_pts, s0, R0, t0,
                 src_nrm=sub_nrm, tgt_nrm=ref_nrm,
             )
+            # Same canonical-orientation gate as the FPFH path: ICP is free
+            # to rotate and can lay a garment flat on its side. Props are
+            # exempt - their true pose is the 90-degree one.
+            if not region.startswith("prop"):
+                from .global_reg import _near_canonical
+
+                if not _near_canonical(R):
+                    continue
             cand = _finish(src, s, R, t, err, ref_tree, ref_pts, ref_nrm)
             if cand["rel"] < 0.12:
                 cand["anchor"] = region
