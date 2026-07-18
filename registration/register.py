@@ -36,7 +36,23 @@ TYPE_KEYWORDS = [
     ("shoes", "shoe"), ("shoes", "boot"), ("shoes", "feet"),
     ("head_accessories", "head"), ("head_accessories", "helmet"),
     ("head_accessories", "hat"), ("head_accessories", "hair"),
+    ("prop", "gear"), ("prop", "weapon"), ("prop", "sword"),
+    ("prop", "staff"), ("prop", "shield"),
 ]
+
+# Which rig regions a garment type may land on. Used only when both a rig
+# and a recognized type name are available; unknown names stay fully
+# type-agnostic. This is the strongest constraint the metadata offers: on
+# stylized sets where a garment is mostly occluded in the baked reference
+# (pants under a coat), coverage alone cannot tell its true region from a
+# snug wrong one.
+TYPE_REGIONS = {
+    "tops": ("upper", "torso", "arm_l", "arm_r"),
+    "bottoms": ("legs", "leg_l", "leg_r"),
+    "shoes": ("shin_l", "shin_r", "foot_l", "foot_r", "feet"),
+    "head_accessories": ("head",),
+    "prop": ("prop_l", "prop_r"),
+}
 
 
 def discover(data_dir):
@@ -82,6 +98,32 @@ def garment_type(name):
         if kw in low:
             return gtype
     return None
+
+
+def _filter_by_type_region(entry, rig_masks, ref_tree):
+    """Drop candidates whose placement lands outside the type's regions.
+
+    A candidate's transformed centroid is snapped to its nearest reference
+    sample; the candidate survives if that sample belongs to one of the
+    regions allowed for the garment's type. No-ops when the type is
+    unknown or nothing would survive (keeping the pool non-empty).
+    """
+    regions = TYPE_REGIONS.get(garment_type(entry["name"]) or "")
+    if not regions or rig_masks is None:
+        return
+    allowed = np.zeros(next(iter(rig_masks.values())).shape[0], dtype=bool)
+    for r in regions:
+        if r in rig_masks:
+            allowed |= rig_masks[r]
+    centroid = entry["src"].mean(axis=0)
+    kept = []
+    for c in entry["cands"]:
+        p = c["s"] * (c["R"] @ centroid) + c["t"]
+        _, idx = ref_tree.query(p[None])
+        if allowed[int(idx[0])]:
+            kept.append(c)
+    if kept:
+        entry["cands"] = kept
 
 
 def load_mesh(path):
@@ -316,8 +358,10 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                     src, src_nrm, rig_masks, ref_pts, ref_tree, ref_nrm
                 )
                 entries[-1]["cands"] = cands + extra
+                _filter_by_type_region(entries[-1], rig_masks, ref_tree)
                 print(f"[..]   {label}: {len(cands)} candidates "
-                      f"+ {len(extra)} anchors")
+                      f"+ {len(extra)} anchors "
+                      f"-> {len(entries[-1]['cands'])} after type filter")
             else:
                 print(f"[..]   {label}: {len(cands)} candidates")
 
@@ -362,6 +406,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 scales=RETRY_SCALE_GRID,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
+            _filter_by_type_region(e, rig_masks, ref_tree)
             retried.append(e["part"])
     if retried:
         print(f"[..]   coverage retry: {', '.join(retried)}")
@@ -523,7 +568,7 @@ def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
         parts_by_name = {}
         for name, (g_scene, g_mesh) in loaded.items():
             gtype = garment_type(name)
-            if gtype is None:
+            if gtype is None or gtype not in INITIALIZERS:
                 print(f"[skip] {name}: no landmark rules for this type; "
                       f"use --method fpfh for arbitrary garments")
                 continue
