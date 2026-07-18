@@ -123,12 +123,15 @@ def trimmed_icp(
                 s = float(((xs - mu_s) * (xd - mu_d)).sum() / max(var, 1e-12))
             t = mu_d - s * mu_s
         if with_scale and not (s_lo <= s <= s_hi):
-            s_clamped = float(np.clip(s, s_lo, s_hi))
-            # Re-solve the translation for the clamped scale.
-            _, R, t = umeyama(s_clamped * src[keep], tpts[idx[keep]], with_scale=False)
-            s = s_clamped
-            R = R.copy()
-            t = t.copy()
+            s = float(np.clip(s, s_lo, s_hi))
+            if with_rot:
+                # Re-solve rotation and translation for the clamped scale.
+                _, R, t = umeyama(s * src[keep], tpts[idx[keep]], with_scale=False)
+                R = R.copy()
+                t = t.copy()
+            else:
+                xs = src[keep] @ R.T
+                t = tpts[idx[keep]].mean(axis=0) - s * xs.mean(axis=0)
     return s, R, t, err
 
 

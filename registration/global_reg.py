@@ -189,9 +189,13 @@ def collect_candidates(
                         cand = c2
             cands.append(cand)
     cands = [c for c in cands if c["rel"] < 0.12]
-    if not cands:  # RANSAC never found a fit; fall back to identity + ICP
+    if not cands:  # RANSAC never found a fit; fall back to identity + ICP.
+        # Rotation stays locked: every gated path above enforces canonical
+        # orientations, and a free-rotation fallback smuggles arbitrary
+        # poses (pants laid flat) past all of them.
         s, R, t, err = trimmed_icp(
-            src_pts, ref_tree, ref_pts, 1.0, np.eye(3), np.zeros(3)
+            src_pts, ref_tree, ref_pts, 1.0, np.eye(3), np.zeros(3),
+            with_rot=False,
         )
         cands.append(_finish(src_pts, s, R, t, err, ref_tree, ref_pts, ref_nrm))
     return cands
