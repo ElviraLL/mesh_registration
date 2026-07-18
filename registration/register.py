@@ -355,7 +355,8 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 from .rig import anchor_candidates
 
                 extra = anchor_candidates(
-                    src, src_nrm, rig_masks, ref_pts, ref_tree, ref_nrm
+                    src, src_nrm, rig_masks, ref_pts, ref_tree, ref_nrm,
+                    regions=TYPE_REGIONS.get(garment_type(name) or ""),
                 )
                 entries[-1]["cands"] = cands + extra
                 _filter_by_type_region(entries[-1], rig_masks, ref_tree)

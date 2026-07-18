@@ -279,16 +279,22 @@ def _axis_align_rot(v, u):
     return np.eye(3) + s * K + (1.0 - c) * (K @ K)
 
 
-def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
+def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm,
+                      regions=None):
     """Skeleton-guided registration candidates for one garment part.
 
-    For each body region: scale from bounding-box extents, translation from
+    For each body region (all of them, or just `regions` when the garment's
+    type is known): scale from bounding-box extents, translation from
     centroids, rotations from the canonical prior (identity / yaw 180) plus
-    principal-axis alignment for elongated parts (a held prop like a sword
-    is vertical in its own frame but horizontal in the avatar's hand - a 90
-    degree pose FPFH's canonical-orientation gate can never produce). Each
-    init is refined with normal-consistent trimmed ICP; the joint coverage
-    selection judges them against the FPFH candidates on equal footing.
+    principal-axis alignment for elongated parts in held-prop regions (a
+    sword is vertical in its own frame but horizontal in the avatar's hand
+    - a 90 degree pose FPFH's canonical-orientation gate can never
+    produce). Refinement is normal-consistent trimmed ICP with the rotation
+    LOCKED outside prop regions: generated garments are upright by
+    convention, and free rotation reliably drags an upright init off
+    canonical (pants over two stubby legs get laid flat), after which the
+    candidate is useless. The joint coverage selection judges the results
+    against the FPFH candidates on equal footing.
     """
     from .global_reg import _finish
     from .icp import trimmed_icp, yaw_matrix
@@ -302,6 +308,8 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
 
     cands = []
     for region, mask in masks.items():
+        if regions is not None and region not in regions:
+            continue
         pts = ref_pts[mask]
         if len(pts) < 300:
             continue
@@ -309,12 +317,9 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
         s0 = r_ext / max(p_ext, 1e-9)
         if not (0.05 <= s0 <= 2.0):
             continue
+        is_prop = region.startswith("prop")
         rots = [np.eye(3), yaw_matrix(180.0)]
-        # Axis alignment only for held-prop regions: garments on a T-pose
-        # body never need a 90-degree pose, and a composite region's
-        # principal axis (both stubby legs -> horizontal) would lay a
-        # garment flat on its side.
-        if elongated and region.startswith("prop"):
+        if elongated and is_prop:
             r_axis, _ = _principal_axis(pts)
             rots += [_axis_align_rot(p_axis, r_axis),
                      _axis_align_rot(p_axis, -r_axis)]
@@ -323,16 +328,8 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
             t0 = center - s0 * (R0 @ p_center)
             s, R, t, err = trimmed_icp(
                 sub, ref_tree, ref_pts, s0, R0, t0,
-                src_nrm=sub_nrm, tgt_nrm=ref_nrm,
+                src_nrm=sub_nrm, tgt_nrm=ref_nrm, with_rot=is_prop,
             )
-            # Same canonical-orientation gate as the FPFH path: ICP is free
-            # to rotate and can lay a garment flat on its side. Props are
-            # exempt - their true pose is the 90-degree one.
-            if not region.startswith("prop"):
-                from .global_reg import _near_canonical
-
-                if not _near_canonical(R):
-                    continue
             cand = _finish(src, s, R, t, err, ref_tree, ref_pts, ref_nrm)
             if cand["rel"] < 0.12:
                 cand["anchor"] = region
