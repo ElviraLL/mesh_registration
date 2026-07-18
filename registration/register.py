@@ -47,8 +47,10 @@ TYPE_KEYWORDS = [
 # (pants under a coat), coverage alone cannot tell its true region from a
 # snug wrong one.
 TYPE_REGIONS = {
-    "tops": ("upper", "torso", "arm_l", "arm_r"),
-    "bottoms": ("legs", "leg_l", "leg_r"),
+    # Whole-garment regions only: allowing single limbs lets a jacket
+    # shrink onto one arm or pants onto one leg and win on snugness.
+    "tops": ("upper", "torso"),
+    "bottoms": ("legs",),
     "shoes": ("shin_l", "shin_r", "foot_l", "foot_r", "feet"),
     "head_accessories": ("head",),
     "prop": ("prop_l", "prop_r"),
