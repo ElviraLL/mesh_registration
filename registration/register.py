@@ -270,7 +270,7 @@ def _mask_submesh(mesh, vmask):
 
 
 def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
-                      n_src=30000):
+                      n_src=30000, rig_masks=None):
     """Type-agnostic registration of every garment: candidates + joint pick.
 
     Phase A collects FPFH+RANSAC candidates per spatially-separate part.
@@ -307,7 +307,19 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 {"name": name, "part": label, "mask": vmask, "src": src,
                  "src_nrm": src_nrm, "area": sub.area, "cands": cands}
             )
-            print(f"[..]   {label}: {len(cands)} candidates")
+            # Skeleton-guided anchors complement FPFH: they cover poses the
+            # feature matching misses (tiny targets, principal-axis flips).
+            if rig_masks is not None and name not in bodies:
+                from .rig import anchor_candidates
+
+                extra = anchor_candidates(
+                    src, src_nrm, rig_masks, ref_pts, ref_tree, ref_nrm
+                )
+                entries[-1]["cands"] = cands + extra
+                print(f"[..]   {label}: {len(cands)} candidates "
+                      f"+ {len(extra)} anchors")
+            else:
+                print(f"[..]   {label}: {len(cands)} candidates")
 
     n_ref = len(ref_pts)
 
@@ -485,8 +497,23 @@ def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
     for name, fname in garments.items():
         loaded[name] = load_mesh(os.path.join(data_dir, fname))
 
+    # With a rigged avatar available, its joints partition the reference
+    # surface into body regions that guide extra registration candidates.
+    rig_masks = None
     if method == "fpfh":
-        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area)
+        from .rig import find_rig, region_masks, rig_body_skeleton
+
+        rig_path = find_rig(data_dir)
+        if rig_path is not None:
+            joints, rig_err = rig_body_skeleton(
+                rig_path, ref_mesh.vertices, ref_pts, ref_tree
+            )
+            rig_masks = region_masks(joints, ref_pts)
+            print(f"[..]   rig: {os.path.basename(rig_path)} "
+                  f"(align err {rig_err:.5f})")
+
+    if method == "fpfh":
+        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area, rig_masks=rig_masks)
         with open(os.path.join(out_dir, "selection_report.json"), "w") as f:
             json.dump(getattr(register_all_fpfh, "last_report", []), f, indent=1)
     else:

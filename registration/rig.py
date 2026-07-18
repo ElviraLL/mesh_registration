@@ -181,3 +181,131 @@ def find_rig(data_dir):
     cands = sorted(glob.glob(os.path.join(data_dir, "rig", "*.glb")))
     cands += sorted(glob.glob(os.path.join(data_dir, "*autosetup*.glb")))
     return cands[0] if cands else None
+
+
+# Body regions as groups of skeleton bones. Composites ('legs', 'upper')
+# cover garments that span several limbs (pants, tops).
+REGION_BONES = {
+    "torso": [("pelvis", "spine"), ("spine", "chest")],
+    "head": [("chest", "neck"), ("neck", "head")],
+    "arm_l": [("chest", "shoulder_l"), ("shoulder_l", "elbow_l"),
+              ("elbow_l", "wrist_l")],
+    "arm_r": [("chest", "shoulder_r"), ("shoulder_r", "elbow_r"),
+              ("elbow_r", "wrist_r")],
+    "leg_l": [("pelvis", "hip_l"), ("hip_l", "knee_l"), ("knee_l", "ankle_l")],
+    "leg_r": [("pelvis", "hip_r"), ("hip_r", "knee_r"), ("knee_r", "ankle_r")],
+    "foot_l": [("ankle_l", "foot_l")],
+    "foot_r": [("ankle_r", "foot_r")],
+}
+REGION_COMPOSITES = {
+    "legs": ["leg_l", "leg_r"],
+    "feet": ["foot_l", "foot_r"],
+    "upper": ["torso", "arm_l", "arm_r"],
+}
+
+
+def region_masks(joints, ref_pts):
+    """Partition the reference samples by nearest skeleton bone.
+
+    Returns {region: bool mask over ref_pts}. Every point belongs to
+    exactly one base region (nearest-bone assignment tiles the surface, so
+    a garment baked into the reference is fully claimed by the regions its
+    bones span - including props like a held sword, which joins the arm
+    region of the hand that holds it).
+    """
+    from .skeleton import BONES, _point_segment_dist
+
+    dists = np.stack([
+        _point_segment_dist(ref_pts, joints[a], joints[b])[0] for a, b in BONES
+    ])
+    nearest = np.argmin(dists, axis=0)
+
+    bone_region = {}
+    for region, bones in REGION_BONES.items():
+        for ab in bones:
+            bone_region[BONES.index(ab)] = region
+    masks = {
+        region: np.isin(nearest, [i for i, r in bone_region.items() if r == region])
+        for region in REGION_BONES
+    }
+    for name, members in REGION_COMPOSITES.items():
+        masks[name] = np.any([masks[m] for m in members], axis=0)
+    return masks
+
+
+def _principal_axis(pts):
+    """(unit principal axis, sorted stddevs desc) of a point cloud."""
+    w, V = np.linalg.eigh(np.cov((pts - pts.mean(axis=0)).T))
+    return V[:, -1], np.sqrt(np.maximum(w[::-1], 0.0))
+
+
+def _axis_align_rot(v, u):
+    """Minimal rotation taking unit vector v onto unit vector u."""
+    c = float(np.clip(v @ u, -1.0, 1.0))
+    axis = np.cross(v, u)
+    s = np.linalg.norm(axis)
+    if s < 1e-9:
+        if c > 0:
+            return np.eye(3)
+        # 180 degrees about any axis perpendicular to v.
+        perp = np.cross(v, [1.0, 0.0, 0.0])
+        if np.linalg.norm(perp) < 1e-6:
+            perp = np.cross(v, [0.0, 1.0, 0.0])
+        perp /= np.linalg.norm(perp)
+        return 2.0 * np.outer(perp, perp) - np.eye(3)
+    axis /= s
+    K = np.array([
+        [0, -axis[2], axis[1]],
+        [axis[2], 0, -axis[0]],
+        [-axis[1], axis[0], 0],
+    ])
+    return np.eye(3) + s * K + (1.0 - c) * (K @ K)
+
+
+def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
+    """Skeleton-guided registration candidates for one garment part.
+
+    For each body region: scale from bounding-box extents, translation from
+    centroids, rotations from the canonical prior (identity / yaw 180) plus
+    principal-axis alignment for elongated parts (a held prop like a sword
+    is vertical in its own frame but horizontal in the avatar's hand - a 90
+    degree pose FPFH's canonical-orientation gate can never produce). Each
+    init is refined with normal-consistent trimmed ICP; the joint coverage
+    selection judges them against the FPFH candidates on equal footing.
+    """
+    from .global_reg import _finish
+    from .icp import trimmed_icp, yaw_matrix
+
+    sub = src[:: max(1, len(src) // 6000)]
+    sub_nrm = src_nrm[:: max(1, len(src) // 6000)] if src_nrm is not None else None
+    p_axis, p_std = _principal_axis(src)
+    p_ext = (src.max(axis=0) - src.min(axis=0)).max()
+    p_center = src.mean(axis=0)
+    elongated = p_std[0] > 2.5 * max(p_std[1], 1e-9)
+
+    cands = []
+    for region, mask in masks.items():
+        pts = ref_pts[mask]
+        if len(pts) < 300:
+            continue
+        r_ext = (pts.max(axis=0) - pts.min(axis=0)).max()
+        s0 = r_ext / max(p_ext, 1e-9)
+        if not (0.05 <= s0 <= 2.0):
+            continue
+        rots = [np.eye(3), yaw_matrix(180.0)]
+        if elongated:
+            r_axis, _ = _principal_axis(pts)
+            rots += [_axis_align_rot(p_axis, r_axis),
+                     _axis_align_rot(p_axis, -r_axis)]
+        center = pts.mean(axis=0)
+        for R0 in rots:
+            t0 = center - s0 * (R0 @ p_center)
+            s, R, t, err = trimmed_icp(
+                sub, ref_tree, ref_pts, s0, R0, t0,
+                src_nrm=sub_nrm, tgt_nrm=ref_nrm,
+            )
+            cand = _finish(src, s, R, t, err, ref_tree, ref_pts, ref_nrm)
+            if cand["rel"] < 0.12:
+                cand["anchor"] = region
+                cands.append(cand)
+    return cands
