@@ -202,6 +202,11 @@ REGION_COMPOSITES = {
     "feet": ["foot_l", "foot_r"],
     "upper": ["torso", "arm_l", "arm_r"],
 }
+# Lower leg + foot: a boot covers the shin, not just the foot-tip bone.
+REGION_SHINS = {
+    "shin_l": [("knee_l", "ankle_l"), ("ankle_l", "foot_l")],
+    "shin_r": [("knee_r", "ankle_r"), ("ankle_r", "foot_r")],
+}
 
 
 def region_masks(joints, ref_pts):
@@ -210,14 +215,20 @@ def region_masks(joints, ref_pts):
     Returns {region: bool mask over ref_pts}. Every point belongs to
     exactly one base region (nearest-bone assignment tiles the surface, so
     a garment baked into the reference is fully claimed by the regions its
-    bones span - including props like a held sword, which joins the arm
-    region of the hand that holds it).
+    bones span). Two derived kinds are added on top: shin regions (lower
+    leg + foot, the surface a boot actually covers) and prop regions - the
+    points past the wrist along the forearm axis, i.e. the hand and
+    whatever it holds, so a carried prop anchors to its own extent rather
+    than to the whole arm.
     """
     from .skeleton import BONES, _point_segment_dist
 
-    dists = np.stack([
-        _point_segment_dist(ref_pts, joints[a], joints[b])[0] for a, b in BONES
-    ])
+    dists, ts = [], []
+    for a, b in BONES:
+        d, t = _point_segment_dist(ref_pts, joints[a], joints[b])
+        dists.append(d)
+        ts.append(t)
+    dists, ts = np.stack(dists), np.stack(ts)
     nearest = np.argmin(dists, axis=0)
 
     bone_region = {}
@@ -230,6 +241,12 @@ def region_masks(joints, ref_pts):
     }
     for name, members in REGION_COMPOSITES.items():
         masks[name] = np.any([masks[m] for m in members], axis=0)
+    for name, bones in REGION_SHINS.items():
+        ids = [BONES.index(ab) for ab in bones]
+        masks[name] = np.isin(nearest, ids)
+    for tag in ("l", "r"):
+        fb = BONES.index((f"elbow_{tag}", f"wrist_{tag}"))
+        masks[f"prop_{tag}"] = (nearest == fb) & (ts[fb] > 0.99)
     return masks
 
 
