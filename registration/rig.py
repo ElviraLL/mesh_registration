@@ -324,14 +324,19 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm,
             rots += [_axis_align_rot(p_axis, r_axis),
                      _axis_align_rot(p_axis, -r_axis)]
         center = pts.mean(axis=0)
-        for R0 in rots:
-            t0 = center - s0 * (R0 @ p_center)
-            s, R, t, err = trimmed_icp(
-                sub, ref_tree, ref_pts, s0, R0, t0,
-                src_nrm=sub_nrm, tgt_nrm=ref_nrm, with_rot=is_prop,
-            )
-            cand = _finish(src, s, R, t, err, ref_tree, ref_pts, ref_nrm)
-            if cand["rel"] < 0.12:
-                cand["anchor"] = region
-                cands.append(cand)
+        # Two scale hypotheses: the region's own extent, and 1.4x for a
+        # garment that overhangs its region (a jacket is taller than the
+        # bare torso). ICP's clamped scale window is centered on the init,
+        # so distinct inits reach distinct convergence basins.
+        for k in (1.0, 1.4):
+            for R0 in rots:
+                t0 = center - k * s0 * (R0 @ p_center)
+                s, R, t, err = trimmed_icp(
+                    sub, ref_tree, ref_pts, k * s0, R0, t0,
+                    src_nrm=sub_nrm, tgt_nrm=ref_nrm, with_rot=is_prop,
+                )
+                cand = _finish(src, s, R, t, err, ref_tree, ref_pts, ref_nrm)
+                if cand["rel"] < 0.12:
+                    cand["anchor"] = region
+                    cands.append(cand)
     return cands
