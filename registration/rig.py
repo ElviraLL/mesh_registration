@@ -310,7 +310,11 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm):
         if not (0.05 <= s0 <= 2.0):
             continue
         rots = [np.eye(3), yaw_matrix(180.0)]
-        if elongated:
+        # Axis alignment only for held-prop regions: garments on a T-pose
+        # body never need a 90-degree pose, and a composite region's
+        # principal axis (both stubby legs -> horizontal) would lay a
+        # garment flat on its side.
+        if elongated and region.startswith("prop"):
             r_axis, _ = _principal_axis(pts)
             rots += [_axis_align_rot(p_axis, r_axis),
                      _axis_align_rot(p_axis, -r_axis)]
