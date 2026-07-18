@@ -51,6 +51,8 @@ def discover(data_dir):
     files = sorted(
         os.path.basename(f)
         for f in _glob.glob(os.path.join(data_dir, "*.glb"))
+        # rigged auto-setup avatars are skeleton sources, not garments
+        if "autosetup" not in os.path.basename(f).lower()
     )
     refs = [f for f in files if "one_piece" in f.lower()]
     if len(refs) != 1:

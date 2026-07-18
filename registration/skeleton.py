@@ -218,9 +218,31 @@ def run(data_dir, out_dir, preview=True):
             f"first (python -m registration.register)"
         )
     body = trimesh.load(body_path, process=False, force="mesh")
-    joints = estimate_body_skeleton(body.vertices)
-    print(f"[ok]   body skeleton: {len(joints)} joints from "
-          f"{os.path.basename(body_path)}")
+
+    # A rigged (auto-setup) avatar beats the geometric heuristics: its
+    # joints are authored, not guessed, so proportions (chibi, long limbs)
+    # cannot break them. Aligned to the one-piece reference frame, which is
+    # the frame every registered garment lives in.
+    from .rig import find_rig, rig_body_skeleton
+
+    rig_path = find_rig(data_dir)
+    if rig_path is not None:
+        from .backend import NNIndex
+        from .register import discover, load_mesh
+
+        reference, _ = discover(data_dir)
+        _, ref_mesh = load_mesh(os.path.join(data_dir, reference))
+        ref_pts, _ = trimesh.sample.sample_surface(ref_mesh, 60000)
+        ref_pts = np.asarray(ref_pts)
+        joints, err = rig_body_skeleton(
+            rig_path, ref_mesh.vertices, ref_pts, NNIndex(ref_pts)
+        )
+        print(f"[ok]   body skeleton: {len(joints)} joints from rig "
+              f"{os.path.basename(rig_path)} (align err {err:.5f})")
+    else:
+        joints = estimate_body_skeleton(body.vertices)
+        print(f"[ok]   body skeleton: {len(joints)} joints from "
+              f"{os.path.basename(body_path)}")
 
     result = {
         "joints": {k: v.tolist() for k, v in joints.items()},
