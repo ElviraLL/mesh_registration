@@ -48,8 +48,11 @@ TYPE_KEYWORDS = [
 # snug wrong one.
 TYPE_REGIONS = {
     # Whole-garment regions only: allowing single limbs lets a jacket
-    # shrink onto one arm or pants onto one leg and win on snugness.
-    "tops": ("upper", "torso"),
+    # shrink onto one arm or pants onto one leg and win on snugness. Tops
+    # deliberately exclude the arm-spanning 'upper' composite: its extent
+    # is the full armspan, and the resulting oversized anchor tarps the
+    # torso and head. A correct tops fit is centered on the torso anyway.
+    "tops": ("torso",),
     "bottoms": ("legs",),
     "shoes": ("shin_l", "shin_r", "foot_l", "foot_r", "feet"),
     "head_accessories": ("head",),
