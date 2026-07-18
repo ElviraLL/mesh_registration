@@ -421,6 +421,37 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
     for e, ci in zip(garment_entries, chosen):
         e["chosen"] = e["cands"][ci]
 
+    # Region-fit override for type-known garments: a garment occluded in
+    # the baked reference (pants under a coat) gives coverage scoring
+    # nothing to work with - its correct pose can float more than a wrong
+    # snug one. The rig regions carry the reliable signal instead: the
+    # garment should MATCH its region's extent and center. ICP fit quality
+    # stays as a secondary term so orientation (which the extent cannot
+    # see) is still decided by geometry.
+    if rig_masks is not None:
+        for e in garment_entries:
+            regions = TYPE_REGIONS.get(garment_type(e["name"]) or "")
+            region_pts = [
+                ref_pts[rig_masks[r]] for r in regions or ()
+                if r in rig_masks and rig_masks[r].sum() >= 300
+            ]
+            if not region_pts:
+                continue
+
+            def cost(c):
+                cur = c["s"] * (e["src"] @ c["R"].T) + c["t"]
+                ext_c = (cur.max(axis=0) - cur.min(axis=0)).max()
+                cent_c = cur.mean(axis=0)
+                fit = min(
+                    abs(np.log(ext_c / max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)))
+                    + 2.0 * np.linalg.norm(cent_c - p.mean(axis=0))
+                    / max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)
+                    for p in region_pts
+                )
+                return fit + 5.0 * c["rel"]
+
+            e["chosen"] = min(e["cands"], key=cost)
+
     # Selection diagnostics: every candidate of every part with the terms
     # of the joint objective, so a wrong pick can be diagnosed offline.
     report = []

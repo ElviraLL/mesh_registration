@@ -331,6 +331,18 @@ def anchor_candidates(src, src_nrm, masks, ref_pts, ref_tree, ref_nrm,
         for k in (1.0, 1.4):
             for R0 in rots:
                 t0 = center - k * s0 * (R0 @ p_center)
+                # The un-refined init is itself a candidate: it IS the
+                # region prior (garment scaled to the region, centered on
+                # it), and for a garment occluded in the baked reference
+                # it can be the best available pose - ICP has no surface
+                # to converge to and only drags it off.
+                raw = _finish(src, k * s0, R0, t0, 0.0,
+                              ref_tree, ref_pts, ref_nrm)
+                raw["err"] = raw["rel"] * k * s0
+                if raw["rel"] < 0.25:
+                    raw["anchor"] = region
+                    raw["raw"] = True
+                    cands.append(raw)
                 s, R, t, err = trimmed_icp(
                     sub, ref_tree, ref_pts, k * s0, R0, t0,
                     src_nrm=sub_nrm, tgt_nrm=ref_nrm, with_rot=is_prop,
