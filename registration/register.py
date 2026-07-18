@@ -377,7 +377,11 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
         for o in garment_entries:
             if o is not e and "weights" in o and "chosen" in o:
                 others = np.maximum(
-                    others, o["weights"][o["cands"].index(o["chosen"])]
+                    # index by identity: dict == on candidates compares
+                    # numpy arrays and raises when scales tie exactly
+                    others, o["weights"][next(
+                        i for i, c in enumerate(o["cands"]) if c is o["chosen"]
+                    )]
                 )
         rows = []
         ws = e.get("weights")
