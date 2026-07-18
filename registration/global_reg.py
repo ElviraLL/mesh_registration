@@ -234,26 +234,26 @@ def _coverage_weights(src_pts, cand, ref_pts, tau=0.012):
     return ((1.0 - d / tau) ** 2).astype(np.float32)
 
 
-def joint_select(parts, ref_pts, ref_area, background=None, beta=0.5,
+def joint_select(parts, ref_pts, ref_area, background=None,
                  rounds=4, tau=0.012):
-    """Choose one candidate per part by maximizing net explained area.
+    """Choose one candidate per part by maximizing discounted explained area.
 
     parts: dicts {"src": samples, "area": unit-frame surface area,
     "cands": [...]}. background: optional soft-coverage array claimed by an
     under-layer (the body), at reduced weight.
 
-    Everything is measured in one currency, fractions of reference surface
-    area:
-
     net = (marginal soft coverage vs. other parts and the background)
-        - beta * float_fraction * (part_area * s^2 / ref_area)
+        * (1 - float_fraction)^2
 
     The reference is the union of the garments, so the correct joint
-    solution tiles its surface. A shrunken fit explains almost no area; an
-    inflated fit "tarps" a large region but pays for the surface it brings
-    that lands nowhere (float), a cost that grows with s^2 and therefore
-    cannot be gamed by scale in either direction. Hidden inner layers make
-    real garments float a little, hence beta < 1.
+    solution tiles its surface. A shrunken fit explains almost no area, so
+    it scores ~0; an inflated "tarp" fit hovers most of its surface in the
+    air (high float) and is quadratically discounted. The discount being
+    multiplicative - not a subtracted area cost - matters when the correct
+    fit itself floats substantially (a stylized standalone garment never
+    matches its baked counterpart exactly): a subtractive cost scaling
+    with the part's own area can push the correct high-coverage fit below
+    zero, at which point any surface-hugging shrunken blob beats it.
 
     Coordinate descent; returns chosen candidate indices.
     """
@@ -268,8 +268,7 @@ def joint_select(parts, ref_pts, ref_area, background=None, beta=0.5,
     def net(part, k, others):
         c = part["cands"][k]
         marginal = np.maximum(part["weights"][k] - others, 0.0).sum() / n_ref
-        cost = beta * c["float"] * (part["area"] * c["s"] ** 2 / ref_area)
-        return marginal - cost
+        return marginal * (1.0 - c["float"]) ** 2
 
     chosen = [
         int(np.argmax([net(p, k, background) for k in range(len(p["cands"]))]))

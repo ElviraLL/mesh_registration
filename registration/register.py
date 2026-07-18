@@ -324,7 +324,8 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
     n_ref = len(ref_pts)
 
     def solo_net(e, c, w):
-        return w.sum() / n_ref - 0.5 * c["float"] * (e["area"] * c["s"] ** 2 / ref_area)
+        # Same discounted-coverage currency as joint_select.
+        return w.sum() / n_ref * (1.0 - c["float"]) ** 2
 
     background = np.zeros(n_ref, dtype=np.float32)
     for e in entries:
@@ -393,9 +394,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 row["marginal"] = float(
                     np.maximum(ws[k] - others, 0.0).sum() / n_ref
                 )
-                row["net"] = row["marginal"] - 0.5 * c["float"] * (
-                    e["area"] * c["s"] ** 2 / ref_area
-                )
+                row["net"] = row["marginal"] * (1.0 - c["float"]) ** 2
             rows.append(row)
         report.append({"part": e["part"], "cands": rows})
     register_all_fpfh.last_report = report
