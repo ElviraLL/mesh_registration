@@ -429,28 +429,48 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
     # stays as a secondary term so orientation (which the extent cannot
     # see) is still decided by geometry.
     if rig_masks is not None:
-        for e in garment_entries:
-            regions = TYPE_REGIONS.get(garment_type(e["name"]) or "")
-            region_pts = [
-                ref_pts[rig_masks[r]] for r in regions or ()
-                if r in rig_masks and rig_masks[r].sum() >= 300
-            ]
-            if not region_pts:
-                continue
+        from .global_reg import _rotation_angle_deg
+        from .icp import yaw_matrix as _yaw
 
-            def cost(c):
+        used = {}  # garment name -> side regions already claimed by a part
+        for e in garment_entries:
+            gtype = garment_type(e["name"]) or ""
+            regions = TYPE_REGIONS.get(gtype)
+            avail = [
+                r for r in regions or ()
+                if r in rig_masks and rig_masks[r].sum() >= 300
+                and r not in used.get(e["name"], set())
+            ]
+            if not avail:
+                continue
+            pts_by_region = {r: ref_pts[rig_masks[r]] for r in avail}
+            best, best_cost, best_region = None, np.inf, None
+            for c in e["cands"]:
                 cur = c["s"] * (e["src"] @ c["R"].T) + c["t"]
                 ext_c = (cur.max(axis=0) - cur.min(axis=0)).max()
                 cent_c = cur.mean(axis=0)
-                fit = min(
-                    abs(np.log(ext_c / max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)))
-                    + 2.0 * np.linalg.norm(cent_c - p.mean(axis=0))
-                    / max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)
-                    for p in region_pts
+                base = 5.0 * c["rel"]
+                if gtype != "prop":
+                    # Tilted fits hug the surface (low rel) but are wrong:
+                    # generated garments are upright.
+                    base += 0.02 * min(
+                        _rotation_angle_deg(c["R"] @ _yaw(-a)) for a in (0.0, 180.0)
+                    )
+                for r, p in pts_by_region.items():
+                    ext_r = max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)
+                    fit = (abs(np.log(ext_c / ext_r))
+                           + 2.0 * np.linalg.norm(cent_c - p.mean(axis=0)) / ext_r)
+                    if base + fit < best_cost:
+                        best, best_cost, best_region = c, base + fit, r
+            e["chosen"] = best
+            # A side region consumed by one part (left boot -> left shin)
+            # is off-limits to its sibling parts, so a pair cannot both
+            # land on the same foot.
+            if best_region and best_region[-2:] in ("_l", "_r"):
+                side = best_region[-2:]
+                used.setdefault(e["name"], set()).update(
+                    r for r in regions if r.endswith(side)
                 )
-                return fit + 5.0 * c["rel"]
-
-            e["chosen"] = min(e["cands"], key=cost)
 
     # Selection diagnostics: every candidate of every part with the terms
     # of the joint objective, so a wrong pick can be diagnosed offline.
