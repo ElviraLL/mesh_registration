@@ -36,7 +36,28 @@ TYPE_KEYWORDS = [
     ("shoes", "shoe"), ("shoes", "boot"), ("shoes", "feet"),
     ("head_accessories", "head"), ("head_accessories", "helmet"),
     ("head_accessories", "hat"), ("head_accessories", "hair"),
+    ("prop", "gear"), ("prop", "weapon"), ("prop", "sword"),
+    ("prop", "staff"), ("prop", "shield"),
 ]
+
+# Which rig regions a garment type may land on. Used only when both a rig
+# and a recognized type name are available; unknown names stay fully
+# type-agnostic. This is the strongest constraint the metadata offers: on
+# stylized sets where a garment is mostly occluded in the baked reference
+# (pants under a coat), coverage alone cannot tell its true region from a
+# snug wrong one.
+TYPE_REGIONS = {
+    # Whole-garment regions only: allowing single limbs lets a jacket
+    # shrink onto one arm or pants onto one leg and win on snugness. Tops
+    # deliberately exclude the arm-spanning 'upper' composite: its extent
+    # is the full armspan, and the resulting oversized anchor tarps the
+    # torso and head. A correct tops fit is centered on the torso anyway.
+    "tops": ("torso",),
+    "bottoms": ("legs",),
+    "shoes": ("shin_l", "shin_r", "foot_l", "foot_r", "feet"),
+    "head_accessories": ("head",),
+    "prop": ("prop_l", "prop_r"),
+}
 
 
 def discover(data_dir):
@@ -51,6 +72,8 @@ def discover(data_dir):
     files = sorted(
         os.path.basename(f)
         for f in _glob.glob(os.path.join(data_dir, "*.glb"))
+        # rigged auto-setup avatars are skeleton sources, not garments
+        if "autosetup" not in os.path.basename(f).lower()
     )
     refs = [f for f in files if "one_piece" in f.lower()]
     if len(refs) != 1:
@@ -80,6 +103,32 @@ def garment_type(name):
         if kw in low:
             return gtype
     return None
+
+
+def _filter_by_type_region(entry, rig_masks, ref_tree):
+    """Drop candidates whose placement lands outside the type's regions.
+
+    A candidate's transformed centroid is snapped to its nearest reference
+    sample; the candidate survives if that sample belongs to one of the
+    regions allowed for the garment's type. No-ops when the type is
+    unknown or nothing would survive (keeping the pool non-empty).
+    """
+    regions = TYPE_REGIONS.get(garment_type(entry["name"]) or "")
+    if not regions or rig_masks is None:
+        return
+    allowed = np.zeros(next(iter(rig_masks.values())).shape[0], dtype=bool)
+    for r in regions:
+        if r in rig_masks:
+            allowed |= rig_masks[r]
+    centroid = entry["src"].mean(axis=0)
+    kept = []
+    for c in entry["cands"]:
+        p = c["s"] * (c["R"] @ centroid) + c["t"]
+        _, idx = ref_tree.query(p[None])
+        if allowed[int(idx[0])]:
+            kept.append(c)
+    if kept:
+        entry["cands"] = kept
 
 
 def load_mesh(path):
@@ -268,7 +317,7 @@ def _mask_submesh(mesh, vmask):
 
 
 def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
-                      n_src=30000):
+                      n_src=30000, rig_masks=None):
     """Type-agnostic registration of every garment: candidates + joint pick.
 
     Phase A collects FPFH+RANSAC candidates per spatially-separate part.
@@ -305,12 +354,28 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 {"name": name, "part": label, "mask": vmask, "src": src,
                  "src_nrm": src_nrm, "area": sub.area, "cands": cands}
             )
-            print(f"[..]   {label}: {len(cands)} candidates")
+            # Skeleton-guided anchors complement FPFH: they cover poses the
+            # feature matching misses (tiny targets, principal-axis flips).
+            if rig_masks is not None and name not in bodies:
+                from .rig import anchor_candidates
+
+                extra = anchor_candidates(
+                    src, src_nrm, rig_masks, ref_pts, ref_tree, ref_nrm,
+                    regions=TYPE_REGIONS.get(garment_type(name) or ""),
+                )
+                entries[-1]["cands"] = cands + extra
+                _filter_by_type_region(entries[-1], rig_masks, ref_tree)
+                print(f"[..]   {label}: {len(cands)} candidates "
+                      f"+ {len(extra)} anchors "
+                      f"-> {len(entries[-1]['cands'])} after type filter")
+            else:
+                print(f"[..]   {label}: {len(cands)} candidates")
 
     n_ref = len(ref_pts)
 
     def solo_net(e, c, w):
-        return w.sum() / n_ref - 0.5 * c["float"] * (e["area"] * c["s"] ** 2 / ref_area)
+        # Same discounted-coverage currency as joint_select.
+        return w.sum() / n_ref * (1.0 - c["float"]) ** 2
 
     background = np.zeros(n_ref, dtype=np.float32)
     for e in entries:
@@ -347,6 +412,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 scales=RETRY_SCALE_GRID,
                 ransac_ref_pts=ref_pts[others < 0.5],
             )
+            _filter_by_type_region(e, rig_masks, ref_tree)
             retried.append(e["part"])
     if retried:
         print(f"[..]   coverage retry: {', '.join(retried)}")
@@ -354,6 +420,57 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
 
     for e, ci in zip(garment_entries, chosen):
         e["chosen"] = e["cands"][ci]
+
+    # Region-fit override for type-known garments: a garment occluded in
+    # the baked reference (pants under a coat) gives coverage scoring
+    # nothing to work with - its correct pose can float more than a wrong
+    # snug one. The rig regions carry the reliable signal instead: the
+    # garment should MATCH its region's extent and center. ICP fit quality
+    # stays as a secondary term so orientation (which the extent cannot
+    # see) is still decided by geometry.
+    if rig_masks is not None:
+        from .global_reg import _rotation_angle_deg
+        from .icp import yaw_matrix as _yaw
+
+        used = {}  # garment name -> side regions already claimed by a part
+        for e in garment_entries:
+            gtype = garment_type(e["name"]) or ""
+            regions = TYPE_REGIONS.get(gtype)
+            avail = [
+                r for r in regions or ()
+                if r in rig_masks and rig_masks[r].sum() >= 300
+                and r not in used.get(e["name"], set())
+            ]
+            if not avail:
+                continue
+            pts_by_region = {r: ref_pts[rig_masks[r]] for r in avail}
+            best, best_cost, best_region = None, np.inf, None
+            for c in e["cands"]:
+                cur = c["s"] * (e["src"] @ c["R"].T) + c["t"]
+                ext_c = (cur.max(axis=0) - cur.min(axis=0)).max()
+                cent_c = cur.mean(axis=0)
+                base = 5.0 * c["rel"]
+                if gtype != "prop":
+                    # Tilted fits hug the surface (low rel) but are wrong:
+                    # generated garments are upright.
+                    base += 0.02 * min(
+                        _rotation_angle_deg(c["R"] @ _yaw(-a)) for a in (0.0, 180.0)
+                    )
+                for r, p in pts_by_region.items():
+                    ext_r = max((p.max(axis=0) - p.min(axis=0)).max(), 1e-9)
+                    fit = (abs(np.log(ext_c / ext_r))
+                           + 2.0 * np.linalg.norm(cent_c - p.mean(axis=0)) / ext_r)
+                    if base + fit < best_cost:
+                        best, best_cost, best_region = c, base + fit, r
+            e["chosen"] = best
+            # A side region consumed by one part (left boot -> left shin)
+            # is off-limits to its sibling parts, so a pair cannot both
+            # land on the same foot.
+            if best_region and best_region[-2:] in ("_l", "_r"):
+                side = best_region[-2:]
+                used.setdefault(e["name"], set()).update(
+                    r for r in regions if r.endswith(side)
+                )
 
     # Selection diagnostics: every candidate of every part with the terms
     # of the joint objective, so a wrong pick can be diagnosed offline.
@@ -363,7 +480,11 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
         for o in garment_entries:
             if o is not e and "weights" in o and "chosen" in o:
                 others = np.maximum(
-                    others, o["weights"][o["cands"].index(o["chosen"])]
+                    # index by identity: dict == on candidates compares
+                    # numpy arrays and raises when scales tie exactly
+                    others, o["weights"][next(
+                        i for i, c in enumerate(o["cands"]) if c is o["chosen"]
+                    )]
                 )
         rows = []
         ws = e.get("weights")
@@ -375,9 +496,7 @@ def register_all_fpfh(loaded, ref_cache, ref_pts, ref_tree, ref_nrm, ref_area,
                 row["marginal"] = float(
                     np.maximum(ws[k] - others, 0.0).sum() / n_ref
                 )
-                row["net"] = row["marginal"] - 0.5 * c["float"] * (
-                    e["area"] * c["s"] ** 2 / ref_area
-                )
+                row["net"] = row["marginal"] * (1.0 - c["float"]) ** 2
             rows.append(row)
         report.append({"part": e["part"], "cands": rows})
     register_all_fpfh.last_report = report
@@ -483,15 +602,30 @@ def register_all(data_dir, out_dir, preview=True, method="fpfh", seed=0):
     for name, fname in garments.items():
         loaded[name] = load_mesh(os.path.join(data_dir, fname))
 
+    # With a rigged avatar available, its joints partition the reference
+    # surface into body regions that guide extra registration candidates.
+    rig_masks = None
     if method == "fpfh":
-        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area)
+        from .rig import find_rig, region_masks, rig_body_skeleton
+
+        rig_path = find_rig(data_dir)
+        if rig_path is not None:
+            joints, rig_err = rig_body_skeleton(
+                rig_path, ref_mesh.vertices, ref_pts, ref_tree
+            )
+            rig_masks = region_masks(joints, ref_pts)
+            print(f"[..]   rig: {os.path.basename(rig_path)} "
+                  f"(align err {rig_err:.5f})")
+
+    if method == "fpfh":
+        parts_by_name = register_all_fpfh(loaded, ref_feat, ref_pts, ref_tree, ref_nrm, ref_mesh.area, rig_masks=rig_masks)
         with open(os.path.join(out_dir, "selection_report.json"), "w") as f:
             json.dump(getattr(register_all_fpfh, "last_report", []), f, indent=1)
     else:
         parts_by_name = {}
         for name, (g_scene, g_mesh) in loaded.items():
             gtype = garment_type(name)
-            if gtype is None:
+            if gtype is None or gtype not in INITIALIZERS:
                 print(f"[skip] {name}: no landmark rules for this type; "
                       f"use --method fpfh for arbitrary garments")
                 continue

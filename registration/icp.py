@@ -56,6 +56,7 @@ def trimmed_icp(
     scale_bounds=(0.6, 1.6),
     src_nrm=None,
     tgt_nrm=None,
+    with_rot=True,
 ):
     """Trimmed ICP estimating a similarity transform.
 
@@ -109,14 +110,28 @@ def trimmed_icp(
         if abs(prev_err - err) < tol:
             break
         prev_err = err
-        s, R, t = umeyama(src[keep], tpts[idx[keep]], with_scale=with_scale)
+        if with_rot:
+            s, R, t = umeyama(src[keep], tpts[idx[keep]], with_scale=with_scale)
+        else:
+            # Rotation locked to the initialization: closed-form s, t for
+            # dst ~= s * (R0 @ src) + t.
+            xs = src[keep] @ R.T
+            xd = tpts[idx[keep]]
+            mu_s, mu_d = xs.mean(axis=0), xd.mean(axis=0)
+            if with_scale:
+                var = ((xs - mu_s) ** 2).sum()
+                s = float(((xs - mu_s) * (xd - mu_d)).sum() / max(var, 1e-12))
+            t = mu_d - s * mu_s
         if with_scale and not (s_lo <= s <= s_hi):
-            s_clamped = float(np.clip(s, s_lo, s_hi))
-            # Re-solve the translation for the clamped scale.
-            _, R, t = umeyama(s_clamped * src[keep], tpts[idx[keep]], with_scale=False)
-            s = s_clamped
-            R = R.copy()
-            t = t.copy()
+            s = float(np.clip(s, s_lo, s_hi))
+            if with_rot:
+                # Re-solve rotation and translation for the clamped scale.
+                _, R, t = umeyama(s * src[keep], tpts[idx[keep]], with_scale=False)
+                R = R.copy()
+                t = t.copy()
+            else:
+                xs = src[keep] @ R.T
+                t = tpts[idx[keep]].mean(axis=0) - s * xs.mean(axis=0)
     return s, R, t, err
 
 
